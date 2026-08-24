@@ -211,11 +211,13 @@ export default function Home() {
             <div className="fishTrail">
               {Array.from({ length: 8 }, (_, index) => <i key={index} />)}
             </div>
-            {/* Two clipped copies let only the tail move while preserving the illustration. */}
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img className="fishBody" src="./dream-fish.png" alt="" draggable={false} />
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img className="fishTail" src="./dream-fish.png" alt="" draggable={false} />
+            <div className="fishFacing">
+              {/* Two clipped copies let only the tail move while preserving the illustration. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="fishBody" src="./dream-fish.png" alt="" draggable={false} />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="fishTail" src="./dream-fish.png" alt="" draggable={false} />
+            </div>
           </div>
         </div>
       </div>
