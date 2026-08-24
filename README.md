@@ -7,7 +7,8 @@
 
 - プロンプト入力
 - 参考画像アップロード
-- 展開図表示
+- CodexによるOriedita操作・折り上がり評価ループ
+- Orieditaで検証した展開図表示
 - ドラッグ操作できる完成形3D表示
 
 ## Local development
@@ -18,6 +19,23 @@ npm run dev
 ```
 
 `http://localhost:3000/` で確認できます。
+
+## Local Oriedita worker
+
+CodexへChatGPTアカウントでログインし、カスタム版OrieditaをビルドしたMacで実行します。
+
+```bash
+npm run local:oriedita
+```
+
+Macへのログイン時に自動起動させる場合:
+
+```bash
+npm run local:install
+```
+
+ローカルサーバーは `127.0.0.1:8788` のみに接続し、サイトから受け取ったジョブを1件ずつ処理します。
+CodexはOrieditaで入力 `.fold` を開き、折り上がりを評価し、最良案をサイトへ返します。
 
 ## Validation
 
