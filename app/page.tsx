@@ -1,273 +1,537 @@
-const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
-const asset = (path: string) => `${basePath}${path}`;
+"use client";
 
-const systemStages = [
-  { number: "01", label: "INPUT", title: "言葉・写真・スケッチ", detail: "つくりたい題材と、残したい特徴を伝える。", status: "NOW" },
-  { number: "02", label: "DECOMPOSE", title: "LLMが意味を分解", detail: "頭・胴体・尾、長さ、対称性、優先度へ。", status: "NOW" },
-  { number: "03", label: "DESIGN", title: "基本形と配置を選ぶ", detail: "グリッド、面積配分、設計方式を組み合わせる。", status: "LAB" },
-  { number: "04", label: "GENERATE", title: "展開図候補をつくる", detail: "幾何計算で山折り・谷折りの候補を生成。", status: "NOW" },
-  { number: "05", label: "SIMULATE", title: "Orieditaで折り計算", detail: "専用ブリッジから折線を追加し、形を確認する。", status: "NOW" },
-  { number: "06", label: "EVALUATE", title: "数学と見た目で評価", detail: "局所条件とVLM評価で改善点を見つける。", status: "LAB" },
-  { number: "07", label: "ITERATE", title: "候補を比較・修正", detail: "複数案を反復し、折り紙らしい形へ近づける。", status: "NEXT" },
-];
+import { useMemo, useState } from "react";
 
-const timeline = [
-  { date: "05.15", phase: "KICKOFF", title: "構想を言葉にする", text: "自然言語から折り紙設計へつなぐ目標を確認。開発と発信の進め方、合宿発表までのロードマップを整理した。", tag: "VISION" },
-  { date: "05.24", phase: "RESEARCH", title: "4段階のシステムを定義", text: "入力、折り可能性の検証、展開図・折り手順生成、Web表示に分解。課題を“折れる”だけでなく“折り紙らしい”設計に置いた。", tag: "SCOPE" },
-  { date: "05.31", phase: "PROTOTYPE", title: "検索から、考えるエージェントへ", text: "既存作品の検索だけでは細かな希望を反映できない。AIに検証と可視化の道具を持たせ、設計を探索させる方針へ進んだ。", tag: "PIVOT" },
-  { date: "06.07", phase: "BOOST CAMP", title: "形だけでなく、折る楽しさを", text: "合宿の対話から、余った紙を隠して形だけ合わせる方法では足りないと気づく。特徴の選び方と人の創作プロセスに注目した。", tag: "INSIGHT" },
-  { date: "06.21", phase: "TOOLCHAIN", title: "複数の折り紙ソフトをつなぐ", text: "特徴抽出、TreeMakerによる面積配分、Orieditaによる検証を組み合わせ、完成形を逆向きに開いて手順を得る案を検討した。", tag: "PIPELINE" },
-  { date: "06.27", phase: "MILESTONE", title: "完成形から開く試作が動く", text: "3Dモデルを安定させ、完成形を逆向きに解体する処理が動作。結果を人が理解でき、実際に折れる手順へ変えることが次の課題になった。", tag: "WORKING" },
-  { date: "07.05", phase: "EXPERIMENT", title: "22.5度系の限界を知る", text: "search22.5を再現。折りやすさはある一方、検索中心で自由度が低く、ツール間のファイル形式にも壁があることが分かった。", tag: "LEARNING" },
-  { date: "07.12", phase: "FIELD TEST", title: "実際に折って評価する", text: "候補を紙で折り、手修正の多さを確認。COrigamiを調査し、TreeMakerとOrieditaの機能を部分的につなげた。", tag: "HANDS-ON" },
-  { date: "07.18", phase: "IMPLEMENT", title: "配置計算とソルバーへ", text: "部位の配置計算と平坦折りソルバーの再現を進め、既存OSSの設計も調査。生成パイプラインの具体化が始まった。", tag: "BUILD" },
-  { date: "07.26", phase: "REDESIGN", title: "基本形とOrieditaへ軸足", text: "専門家の助言をもとに22.5度依存を見直す。.foldの完成座標から線を出し、川崎定理の局所条件を可視化する試作を作った。", tag: "CHECK" },
-  { date: "08.16", phase: "LOOP", title: "金魚を生成し、見た目を比べる", text: "Orieditaの折り上がりを別枠表示。金魚らしい平面候補を生成し、複数の視覚モデルで評価する反復実験を行った。", tag: "GOLDFISH" },
-  { date: "08.23", phase: "MIDTERM", title: "自動操作から、評価基準の設計へ", text: "Oriedita用API/MCPで折線追加・保存・折り計算までを自動化。速度と評価ループを見直し、Few-shotや対称性、複数候補比較を次の実験に設定した。", tag: "CURRENT" },
-];
+import {
+  PRESETS,
+  analyzeDescription,
+  candidateToFold,
+  candidateToSvg,
+  createPart,
+  generateCandidates,
+  withAngleOffset,
+  type Candidate,
+  type Part,
+  type Preset,
+} from "./origami-engine";
 
-const researchLinks = [
-  { title: "Learn2Fold", type: "PAPER", href: "https://arxiv.org/abs/2603.29585" },
-  { title: "COrigami", type: "PAPER / PROJECT", href: "https://www.tomzahavy.com/projects/corigami" },
-  { title: "Oriedita", type: "OPEN SOURCE", href: "https://github.com/oriedita/oriedita" },
-  { title: "Origami Simulator", type: "SIMULATION", href: "https://origamisimulator.org/" },
-  { title: "step-folder", type: "FOLDING STEPS", href: "https://kei-morisue.github.io/step-folder/" },
-  { title: "折り紙研究（筑波大学）", type: "RESEARCH", href: "https://mitani.cs.tsukuba.ac.jp/origami/" },
-];
+const defaultDescription = "丸い胴体と大きく広がる尾びれを持つ金魚";
+const defaultAnalysis = analyzeDescription(defaultDescription);
+const defaultSettings = { complexity: 3, symmetry: true, seed: 26 };
+const defaultCandidates = generateCandidates({
+  description: defaultDescription,
+  parts: defaultAnalysis.parts,
+  ...defaultSettings,
+});
+const complexityLabels = ["", "MINIMAL", "SIMPLE", "STANDARD", "DETAILED", "DENSE"];
+
+function formatResidual(value: number) {
+  if (!Number.isFinite(value)) return "—";
+  return value < 0.0001 ? value.toExponential(2) : value.toFixed(6);
+}
+
+function downloadText(contents: string, filename: string, mimeType: string) {
+  const blob = new Blob([contents], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function CreasePattern({ candidate }: { candidate: Candidate }) {
+  const radialEdges = candidate.edges.slice(-candidate.degree);
+  const uniqueLabels = candidate.partLabels
+    .map((label, index) => ({ label, index }))
+    .filter((item, index, items) => items.findIndex((other) => other.label === item.label) === index);
+
+  return (
+    <svg className="creaseSvg" viewBox="0 0 600 600" role="img" aria-labelledby="crease-title crease-desc">
+      <title id="crease-title">選択中の単頂点折り紙構造候補</title>
+      <desc id="crease-desc">赤い実線は仮の山折り、青い破線は仮の谷折り。中央頂点の川崎残差を計算しています。</desc>
+      <defs>
+        <pattern id="paper-grid" width="30" height="30" patternUnits="userSpaceOnUse">
+          <path d="M 30 0 L 0 0 0 30" fill="none" stroke="rgba(19,34,60,.08)" strokeWidth="1" />
+        </pattern>
+      </defs>
+      <rect width="600" height="600" className="paperFill" />
+      <rect width="600" height="600" fill="url(#paper-grid)" />
+      {candidate.edges.map((edge, index) => {
+        const [from, to] = edge.vertices;
+        const [x1, y1] = candidate.vertices[from];
+        const [x2, y2] = candidate.vertices[to];
+        return (
+          <line
+            key={`${from}-${to}-${index}`}
+            x1={x1}
+            y1={y1}
+            x2={x2}
+            y2={y2}
+            className={`creaseEdge assignment${edge.assignment}`}
+            vectorEffect="non-scaling-stroke"
+          />
+        );
+      })}
+      {uniqueLabels.map(({ label, index }) => {
+        const edge = radialEdges[index];
+        if (!edge) return null;
+        const endpoint = candidate.vertices[edge.vertices[1]];
+        const x = 300 + (endpoint[0] - 300) * 0.69;
+        const y = 300 + (endpoint[1] - 300) * 0.69;
+        return <text key={label} x={x} y={y} className="featureLabel">{label}</text>;
+      })}
+      <circle cx="300" cy="300" r="7" className="centerNode" />
+      <circle cx="300" cy="300" r="16" className="centerHalo" />
+    </svg>
+  );
+}
+
+function MotifSilhouette({ presetKey }: { presetKey: string }) {
+  return (
+    <svg className="motifSvg" viewBox="0 0 240 130" role="img" aria-label="入力から選ばれた目標シルエット">
+      {presetKey === "goldfish" && (
+        <>
+          <ellipse cx="112" cy="66" rx="60" ry="37" />
+          <path d="M55 65 9 24 22 68 8 111 57 78Z" />
+          <path d="M104 34 126 8 135 39M108 96 132 121 140 91" />
+          <circle cx="151" cy="56" r="4" className="motifEye" />
+        </>
+      )}
+      {presetKey === "beetle" && (
+        <>
+          <ellipse cx="120" cy="72" rx="33" ry="48" />
+          <circle cx="120" cy="31" r="23" />
+          <path d="M107 17 79 3 91 31M133 17 161 3 149 31M90 53 42 30M89 72 32 72M94 91 50 116M150 53 198 30M151 72 208 72M146 91 190 116" />
+        </>
+      )}
+      {presetKey === "crane" && (
+        <path d="M18 84 94 48 119 60 169 13 153 65 222 86 153 91 129 120 110 91 70 110 92 77Z" />
+      )}
+      {presetKey === "flower" && (
+        <>
+          <path d="M120 63C76 45 78 2 120 42 162 2 164 45 120 63ZM120 63C102 107 59 105 99 63 59 21 102 19 120 63ZM120 63C138 19 181 21 141 63 181 105 138 107 120 63Z" />
+          <circle cx="120" cy="63" r="17" className="motifEye" />
+        </>
+      )}
+      {!PRESETS.some((preset) => preset.key === presetKey) && (
+        <path d="M18 65 67 23 112 43 154 12 224 65 154 118 112 87 67 107Z" />
+      )}
+    </svg>
+  );
+}
 
 export default function Home() {
+  const [description, setDescription] = useState(defaultDescription);
+  const [presetKey, setPresetKey] = useState(defaultAnalysis.presetKey);
+  const [parts, setParts] = useState<Part[]>(defaultAnalysis.parts);
+  const [complexity, setComplexity] = useState(defaultSettings.complexity);
+  const [symmetry, setSymmetry] = useState(defaultSettings.symmetry);
+  const [seed, setSeed] = useState(defaultSettings.seed);
+  const [candidates, setCandidates] = useState(defaultCandidates);
+  const [selectedId, setSelectedId] = useState(defaultCandidates[0].id);
+  const [angleOffset, setAngleOffset] = useState(0);
+  const [status, setStatus] = useState("金魚のサンプルから3候補を生成しました");
+
+  const baseCandidate = candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0];
+  const selectedCandidate = useMemo(
+    () => withAngleOffset(baseCandidate, angleOffset, parts, symmetry),
+    [angleOffset, baseCandidate, parts, symmetry],
+  );
+  const localWithinTolerance = selectedCandidate.residualRad <= 0.000001;
+  const exportReady = selectedCandidate.validationIssues.length === 0;
+
+  function organizeFeatures() {
+    const analysis = analyzeDescription(description);
+    setPresetKey(analysis.presetKey);
+    setParts(analysis.parts);
+    setStatus(`${analysis.presetLabel}の語彙テンプレートで、残したい特徴を整理しました`);
+  }
+
+  function regenerate(nextDescription = description, nextParts = parts, nextPresetKey = presetKey) {
+    if (!nextDescription.trim()) {
+      setStatus("つくりたい形を入力してください");
+      return;
+    }
+    if (nextParts.length < 2) {
+      setStatus("構造候補には特徴が2つ以上必要です");
+      return;
+    }
+    const nextCandidates = generateCandidates({
+      description: nextDescription,
+      parts: nextParts,
+      complexity,
+      symmetry,
+      seed,
+    });
+    setCandidates(nextCandidates);
+    setSelectedId(nextCandidates[0].id);
+    setAngleOffset(0);
+    setPresetKey(nextPresetKey);
+    setStatus(`${nextParts.length}個の特徴から、${nextCandidates[0].degree}本線の候補を3案生成しました`);
+  }
+
+  function applyPreset(preset: Preset) {
+    const analysis = analyzeDescription(preset.description);
+    setDescription(preset.description);
+    setParts(analysis.parts);
+    setPresetKey(preset.key);
+    regenerate(preset.description, analysis.parts, preset.key);
+  }
+
+  function updatePart(id: string, patch: Partial<Part>) {
+    setParts((current) => current.map((part) => (part.id === id ? { ...part, ...patch } : part)));
+  }
+
+  function removePart(id: string) {
+    setParts((current) => current.filter((part) => part.id !== id));
+  }
+
+  function selectCandidate(candidate: Candidate) {
+    setSelectedId(candidate.id);
+    setAngleOffset(0);
+    setStatus(`${candidate.title} を選択しました`);
+  }
+
+  function exportSvg() {
+    if (!exportReady) return;
+    downloadText(
+      candidateToSvg(selectedCandidate, description),
+      `ori-ai-${presetKey}-${selectedCandidate.title.toLowerCase().replaceAll(" ", "-")}.svg`,
+      "image/svg+xml;charset=utf-8",
+    );
+    setStatus("選択中の構造候補をSVGで書き出しました");
+  }
+
+  function exportFold() {
+    if (!exportReady) return;
+    downloadText(
+      candidateToFold(selectedCandidate, description),
+      `ori-ai-${presetKey}-${selectedCandidate.title.toLowerCase().replaceAll(" ", "-")}.fold`,
+      "application/json;charset=utf-8",
+    );
+    setStatus("選択中の構造候補をFOLD 1.2で書き出しました");
+  }
+
   return (
-    <main>
-      <section className="hero" id="top">
-        <nav className="nav" aria-label="メインナビゲーション">
-          <a className="brand" href="#top" aria-label="ORI AI トップへ">
-            <span className="brandMark" aria-hidden="true" />
-            <span>ORI / AI</span>
-          </a>
-          <div className="navLinks">
-            <a href="#concept">概要</a>
-            <a href="#system">仕組み</a>
-            <a href="#progress">開発ログ</a>
-            <a href="#experiments">実験</a>
-          </div>
-          <div className="navMeta">
-            <span>MITOU JR. 2026</span>
-            <span className="navRule" aria-hidden="true" />
-            <span>YUKA ITO</span>
-          </div>
+    <main className="appShell">
+      <header className="topBar" id="top">
+        <a className="brand" href="#top" aria-label="ORI AI Studio トップへ">
+          <span className="brandMark" aria-hidden="true"><i /><i /></span>
+          <span>ORI AI STUDIO</span>
+        </a>
+        <nav aria-label="メインナビゲーション">
+          <a href="#studio">STUDIO</a>
+          <a href="#method">METHOD</a>
+          <a href="#scope">SCOPE</a>
+          <a href="https://github.com/yuka-718/ito-pj-2026" target="_blank" rel="noreferrer">GITHUB ↗</a>
         </nav>
+        <span className="buildBadge">MITOU JR. 2026 / BROWSER BUILD 01</span>
+      </header>
 
-        <div className="heroGrid">
-          <div className="heroCopy">
-            <p className="eyebrow"><span>01</span> PROJECT STATEMENT</p>
-            <h1>
-              折り紙の<span className="accent">「構造」</span>を、
-              <br />AIと探る。
-            </h1>
-            <p className="lead">
-              完成形から、折れる展開図へ。人が創作折り紙で行う思考を手がかりに、
-              LLMと既存の折り紙ソフトをつなぐ制作支援ツールを研究・開発しています。
-            </p>
-            <div className="heroActions">
-              <a className="primaryAction" href="#system">仕組みを見る <span>↘</span></a>
-              <p>2026年 未踏ジュニア採択<br />クリエーター：伊藤 夕夏</p>
-            </div>
-          </div>
-
-          <div className="heroVisual" aria-label="折り紙の形と計算グリッドを組み合わせたイメージ">
-            <div className="visualLabel"><span>FOLD / UNFOLD</span><span>2026.08</span></div>
-            <div className="gridPlane" aria-hidden="true">
-              <span className="fold foldOne" />
-              <span className="fold foldTwo" />
-              <span className="fold foldThree" />
-              <span className="node nodeOne" />
-              <span className="node nodeTwo" />
-              <span className="node nodeThree" />
-              <span className="axis axisX">X</span>
-              <span className="axis axisY">Y</span>
-            </div>
-            <div className="visualFooter"><span>LOCAL FLAT-FOLDABILITY</span><strong>PASS</strong></div>
-          </div>
-        </div>
-        <a className="scrollCue" href="#concept"><span>SCROLL TO UNFOLD</span><i aria-hidden="true">↓</i></a>
-      </section>
-
-      <section className="concept" id="concept">
-        <p className="sectionIndex">02 / CONCEPT</p>
-        <div className="conceptIntro">
-          <h2>つくる人の直感と、<br />計算できるルールのあいだ。</h2>
+      <section className="hero">
+        <div className="heroIndex"><span>01</span><i />ORIGAMI DESIGN LAB</div>
+        <div className="heroTitle">
+          <h1>言葉から、<br /><em>折りの候補</em>へ。</h1>
           <p>
-            折り紙には、川崎定理など検証できる局所条件がある一方、
-            「何をどう折ればその形になるか」という創作者の経験知があります。
-            このプロジェクトは、その両方を一つの制作フローへ編み直します。
+            つくりたい形を部位に分け、単頂点の構造候補を探索するブラウザ版スタジオ。
+            特徴を編集し、局所条件を確かめ、SVGやFOLDとして持ち出せます。
           </p>
         </div>
-        <div className="conceptSteps" aria-label="プロジェクトの基本フロー">
-          <article><span>INPUT</span><strong>つくりたい形</strong><i>01</i></article>
-          <article><span>AGENT</span><strong>LLMが操作・探索</strong><i>02</i></article>
-          <article><span>VERIFY</span><strong>折れるかを検証</strong><i>03</i></article>
-          <article><span>OUTPUT</span><strong>展開図の候補</strong><i>04</i></article>
-        </div>
-        <div className="projectStats" aria-label="プロジェクト概要">
-          <div><strong>12</strong><span>DEVELOPMENT LOGS</span></div>
-          <div><strong>MAY—AUG</strong><span>2026 TIMELINE</span></div>
-          <div><strong>2D</strong><span>CURRENT FOCUS</span></div>
-          <div><strong>R&amp;D</strong><span>RESEARCH PROTOTYPE</span></div>
+        <div className="heroFacts" aria-label="アプリの機能">
+          <div><strong>03</strong><span>CANDIDATES</span></div>
+          <div><strong>LIVE</strong><span>LOCAL CHECK</span></div>
+          <div><strong>SVG / FOLD</strong><span>EXPORT</span></div>
         </div>
       </section>
 
-      <section className="origin" aria-labelledby="origin-title">
-        <div className="originImage">
-          <img src={asset("/origami-insect.png")} alt="緑色の紙で精巧に折られた昆虫の折り紙" />
-          <div className="imageStamp"><span>WHY ORIGAMI?</span><strong>THE STARTING POINT</strong></div>
-        </div>
-        <div className="originCopy">
-          <p className="sectionIndex">03 / ORIGIN</p>
-          <h2 id="origin-title">正解が一つではないから、<br />創作はおもしろい。</h2>
-          <p className="originLead">
-            本にない形を、自分で折ってみたい。その原体験から始まった研究です。
-            目的はボタン一つの“正解生成”ではなく、つくる人が候補を比べ、
-            試し、選べる相棒をつくることです。
-          </p>
-          <div className="originNotes">
-            <article><span>01</span><div><strong>特徴を選ぶ</strong><p>全部を再現するのではなく、その題材らしさを決める部位を見つける。</p></div></article>
-            <article><span>02</span><div><strong>基本形から考える</strong><p>既存の知識、グリッド、面積配分を手がかりに、折り紙らしい構造を探る。</p></div></article>
-            <article><span>03</span><div><strong>手を動かして確かめる</strong><p>シミュレーションだけで終わらせず、人が紙で折れるか、楽しいかを問い続ける。</p></div></article>
+      <section className="studio" id="studio" aria-label="折り紙構造候補スタジオ">
+        <aside className="controlPanel">
+          <div className="panelTitle">
+            <span>01 / DESIGN INPUT</span>
+            <strong>つくりたい形を<br />構造へ分ける</strong>
+          </div>
+
+          <fieldset className="presetField">
+            <legend>EXAMPLES</legend>
+            <div className="presetButtons">
+              {PRESETS.map((preset) => (
+                <button
+                  key={preset.key}
+                  type="button"
+                  className={presetKey === preset.key ? "isActive" : ""}
+                  aria-pressed={presetKey === preset.key}
+                  onClick={() => applyPreset(preset)}
+                >
+                  {preset.label}<span>↗</span>
+                </button>
+              ))}
+            </div>
+          </fieldset>
+
+          <div className="ideaField">
+            <label htmlFor="idea">IDEA / つくりたい形</label>
+            <textarea
+              id="idea"
+              value={description}
+              onChange={(event) => {
+                setDescription(event.target.value);
+                setPresetKey("custom");
+              }}
+              rows={4}
+              maxLength={160}
+            />
+            <div className="fieldMeta"><span>{description.length} / 160</span><span>日本語キーワード対応</span></div>
+            <button type="button" className="organizeButton" onClick={organizeFeatures}>
+              語彙テンプレートで特徴を整理 <span>↓</span>
+            </button>
+          </div>
+
+          <div className="partsEditor">
+            <div className="subhead"><span>02 / FEATURES</span><strong>{parts.length} PARTS</strong></div>
+            <p className="helperText">名前・重要度・紙の上で伸ばしたい方向を編集できます。</p>
+            <div className="partList">
+              {parts.map((part, index) => (
+                <article className="partRow" key={part.id}>
+                  <span className="partNumber">{String(index + 1).padStart(2, "0")}</span>
+                  <div className="partMain">
+                    <label>
+                      <span className="srOnly">特徴 {index + 1} の名前</span>
+                      <input
+                        type="text"
+                        value={part.label}
+                        maxLength={18}
+                        onChange={(event) => updatePart(part.id, { label: event.target.value })}
+                      />
+                    </label>
+                    <div className="partControls">
+                      <label>
+                        <span>重要度 {part.importance}</span>
+                        <input
+                          type="range"
+                          min="1"
+                          max="5"
+                          value={part.importance}
+                          onChange={(event) => updatePart(part.id, { importance: Number(event.target.value) })}
+                        />
+                      </label>
+                      <label>
+                        <span>方向</span>
+                        <input
+                          className="directionInput"
+                          type="number"
+                          min="0"
+                          max="359"
+                          value={part.direction}
+                          onChange={(event) => updatePart(part.id, { direction: Number(event.target.value) })}
+                          aria-label={`${part.label} の方向（度）`}
+                        />
+                        <span>°</span>
+                      </label>
+                    </div>
+                  </div>
+                  <button type="button" className="removePart" onClick={() => removePart(part.id)} aria-label={`${part.label}を削除`}>×</button>
+                </article>
+              ))}
+            </div>
+            <button type="button" className="addPart" onClick={() => setParts((current) => [...current, createPart(current.length + 1)])}>
+              ＋ 特徴を追加
+            </button>
+          </div>
+
+          <div className="generatorSettings">
+            <div className="subhead"><span>03 / SEARCH SETTINGS</span><strong>{complexityLabels[complexity]}</strong></div>
+            <label className="rangeSetting">
+              <span>構造の密度 <output>{complexity} / 5</output></span>
+              <input type="range" min="1" max="5" value={complexity} onChange={(event) => setComplexity(Number(event.target.value))} />
+            </label>
+            <div className="toggleSetting">
+              <span><strong>左右のバランスを優先</strong><small>鏡映方向に近い線配置を高く評価</small></span>
+              <input id="symmetry-toggle" aria-label="左右のバランスを優先" type="checkbox" checked={symmetry} onChange={(event) => setSymmetry(event.target.checked)} />
+              <i aria-hidden="true" />
+            </div>
+            <label className="seedSetting">
+              <span>SEED</span>
+              <input type="number" min="0" max="999999" value={seed} onChange={(event) => setSeed(Number(event.target.value))} />
+            </label>
+          </div>
+
+          <button type="button" className="generateButton" onClick={() => regenerate()}>
+            <span>3つの構造候補を生成</span><i aria-hidden="true">↗</i>
+          </button>
+          <p className="statusLine" role="status" aria-live="polite">{status}</p>
+        </aside>
+
+        <div className="resultPanel">
+          <div className="resultHeader">
+            <div><span>02 / STRUCTURE CANDIDATES</span><strong>比較して、選んで、ずらしてみる</strong></div>
+            <div className="lineLegend" aria-label="折線の凡例">
+              <span><i className="mountainKey" />M / 仮の山折り</span>
+              <span><i className="valleyKey" />V / 仮の谷折り</span>
+            </div>
+          </div>
+
+          <div className="candidateTabs" role="group" aria-label="生成した3つの候補">
+            {candidates.map((candidate, index) => (
+              <button
+                type="button"
+                key={candidate.id}
+                className={baseCandidate.id === candidate.id ? "isSelected" : ""}
+                aria-pressed={baseCandidate.id === candidate.id}
+                onClick={() => selectCandidate(candidate)}
+              >
+                <span>0{index + 1} / {candidate.title}</span>
+                <strong>{candidate.score}<small>/100</small></strong>
+                <em>{candidate.subtitle}</em>
+              </button>
+            ))}
+          </div>
+
+          <div className="resultWorkspace">
+            <div className="canvasColumn">
+              <div className="canvasToolbar">
+                <span>SINGLE-VERTEX CP / {selectedCandidate.degree} RAYS</span>
+                <span>600 × 600 UNIT PAPER</span>
+              </div>
+              <div className="canvasFrame">
+                <CreasePattern candidate={selectedCandidate} />
+                <span className="canvasAxis axisZero">0°</span>
+                <span className="canvasAxis axisNinety">90°</span>
+              </div>
+              <div className="canvasCaption">
+                <span>中心頂点 V-01</span>
+                <p>特徴ラベルは最も近い放射線へ割り当て。線の赤／青は局所必要条件を数えるための仮割当です。</p>
+              </div>
+            </div>
+
+            <aside className="inspector" aria-label="選択中候補の検証結果">
+              <div className="inspectorTitle"><span>03 / INSPECT</span><strong>{selectedCandidate.title}</strong></div>
+
+              <section className="targetCard" aria-labelledby="target-title">
+                <div><span>INPUT TARGET</span><strong id="target-title">{presetKey === "custom" ? "自由入力" : PRESETS.find((preset) => preset.key === presetKey)?.label}</strong></div>
+                <MotifSilhouette presetKey={presetKey} />
+                <p>目標シルエット。折り上がりシミュレーションではありません。</p>
+              </section>
+
+              <section className={`checkCard ${localWithinTolerance ? "isWithin" : "hasResidual"}`}>
+                <div className="checkStatus"><span>LOCAL KAWASAKI</span><strong>{localWithinTolerance ? "数値許容内" : "残差あり"}</strong></div>
+                <div className="residualValue"><strong>{formatResidual(selectedCandidate.residualRad)}</strong><span>rad</span></div>
+                <p>{formatResidual(selectedCandidate.residualDeg)}° / 許容値 1.0e−6 rad</p>
+              </section>
+
+              <section className="angleTest">
+                <label htmlFor="angle-offset"><span>1本目の線を検証用にずらす</span><output>{angleOffset > 0 ? "+" : ""}{angleOffset.toFixed(1)}°</output></label>
+                <input
+                  id="angle-offset"
+                  type="range"
+                  min="-8"
+                  max="8"
+                  step="0.5"
+                  value={angleOffset}
+                  onChange={(event) => setAngleOffset(Number(event.target.value))}
+                />
+                <button type="button" onClick={() => setAngleOffset(0)}>0°に戻す</button>
+              </section>
+
+              <section className="scoreCard">
+                <div className="scoreLead"><span>CANDIDATE SCORE</span><strong>{selectedCandidate.score}<small>/100</small></strong></div>
+                {Object.entries({
+                  "特徴方向": selectedCandidate.scores.feature,
+                  "左右バランス": selectedCandidate.scores.balance,
+                  "セクター余白": selectedCandidate.scores.clarity,
+                  "局所条件": selectedCandidate.scores.local,
+                }).map(([label, value]) => (
+                  <div className="scoreRow" key={label}>
+                    <span>{label}</span><i><b style={{ width: `${value}%` }} /></i><strong>{value}</strong>
+                  </div>
+                ))}
+              </section>
+
+              <dl className="technicalList">
+                <div><dt>次数</dt><dd>{selectedCandidate.degree}</dd></div>
+                <div><dt>最小セクター</dt><dd>{selectedCandidate.minSectorDeg.toFixed(1)}°</dd></div>
+                <div><dt>Maekawa |M−V|</dt><dd>{selectedCandidate.maekawaDifference}</dd></div>
+                <div><dt>グラフ検査</dt><dd>{exportReady ? "問題なし" : `${selectedCandidate.validationIssues.length}件`}</dd></div>
+              </dl>
+            </aside>
+          </div>
+
+          <div className="exportBar">
+            <div>
+              <span>04 / TAKE IT FURTHER</span>
+              <strong>次の検証へ持ち出す</strong>
+              <p>表示と同じ内部グラフを書き出します。FOLDはOriedita等での追加検証用です。</p>
+            </div>
+            <button type="button" onClick={exportSvg} disabled={!exportReady}><span>SVG</span>図として保存 <i>↓</i></button>
+            <button type="button" onClick={exportFold} disabled={!exportReady}><span>.FOLD 1.2</span>構造データを保存 <i>↓</i></button>
+          </div>
+
+          <div className="researchNotice">
+            <strong>!</strong>
+            <p>
+              ここで確認しているのは中心1頂点の局所必要条件です。
+              <b>作品全体の平坦折り、層順、自己衝突、紙の厚み、人が折れる手順は未検査</b>であり、実際に一枚の紙から折れることを保証しません。
+            </p>
           </div>
         </div>
       </section>
 
-      <section className="system" id="system">
-        <div className="systemHeader">
-          <p className="sectionIndex light">04 / SYSTEM</p>
-          <div>
-            <h2>言葉から、折り上がりまで。<br /><span>生成と評価を、ひとつのループに。</span></h2>
-            <p>LLMがすべてを計算するのではなく、意味の理解はLLM、正確な幾何処理は専用ツールへ。得意分野をつなぐ設計です。</p>
-          </div>
+      <section className="method" id="method">
+        <div className="sectionHeading">
+          <span>03 / WHAT THIS BUILD DOES</span>
+          <h2>入力から書き出しまで、<br />ブラウザ内で本当に計算する。</h2>
+          <p>Cosenseに記録された「特徴分解 → 構造候補 → 局所検証 → 外部ツール」という流れを、秘密鍵やサーバーなしで試せる範囲に絞りました。</p>
         </div>
-        <ol className="systemFlow">
-          {systemStages.map((stage) => (
-            <li key={stage.number}>
-              <div className="flowTop"><span>{stage.number} / {stage.label}</span><em className={`status status${stage.status}`}>{stage.status}</em></div>
-              <strong>{stage.title}</strong>
-              <p>{stage.detail}</p>
-            </li>
-          ))}
+        <ol className="methodGrid">
+          <li><span>01 / PARSE</span><strong>語彙テンプレート</strong><p>金魚・昆虫・鶴・花の語彙から部位候補を整理。結果は人が名前、重要度、方向を修正します。</p></li>
+          <li><span>02 / CONSTRUCT</span><strong>単頂点候補探索</strong><p>偶数・奇数番セクターの合計がそれぞれ180°になる角度列を多数つくり、入力特徴との近さで比較します。</p></li>
+          <li><span>03 / VERIFY</span><strong>残差を再計算</strong><p>中心線の角度を動かすたび、川崎定理の局所残差と仮の山谷本数差を同じグラフから再計算します。</p></li>
+          <li><span>04 / EXPORT</span><strong>次の道具へ渡す</strong><p>SVGとFOLD 1.2を生成。未検査項目もファイル内へ明記し、Orieditaなどで続きの検証ができます。</p></li>
         </ol>
-        <div className="legend" aria-label="開発状況の凡例">
-          <span><i className="legendNow" /> NOW：試作済み</span>
-          <span><i className="legendLab" /> LAB：実験中</span>
-          <span><i className="legendNext" /> NEXT：今後</span>
-        </div>
       </section>
 
-      <section className="progress" id="progress">
-        <div className="progressTitle">
-          <p className="sectionIndex">05 / PROGRESS</p>
-          <h2>折って、ほどいて、<br />また考える。</h2>
-          <p>2026年5月のキックオフから中間発表まで。実装だけでなく、問いそのものを更新してきた記録です。</p>
+      <section className="scope" id="scope">
+        <div className="scopeLabel"><span>RESEARCH</span><strong>SCOPE</strong></div>
+        <div className="scopeIntro">
+          <span>04 / HONEST PROTOTYPING</span>
+          <h2>できることと、<br />まだ研究中のこと。</h2>
+          <p>「局所条件を満たす」と「作品全体が折れる」は別です。この境界を画面と書き出しデータの両方に残しています。</p>
         </div>
-        <ol className="timeline">
-          {timeline.map((item, index) => (
-            <li key={item.date} className={index === timeline.length - 1 ? "isCurrent" : ""}>
-              <div className="timelineDate"><strong>{item.date}</strong><span>2026</span></div>
-              <div className="timelineBody"><span className="timelinePhase">{item.phase}</span><h3>{item.title}</h3><p>{item.text}</p></div>
-              <span className="timelineTag">{item.tag}</span>
-            </li>
-          ))}
-        </ol>
-      </section>
-
-      <section className="experiments" id="experiments">
-        <div className="experimentsHeader">
-          <p className="sectionIndex">06 / EXPERIMENTS</p>
-          <h2>現在地は、<br />“折れるかもしれない”を<br />丁寧に確かめるところ。</h2>
-        </div>
-        <div className="experimentGrid">
-          <figure className="experimentMain">
-            <div className="figureImage technical"><img src={asset("/foldability-check.png")} alt="部位ごとの折線候補と川崎定理の局所条件を表示する試作画面" /></div>
-            <figcaption><span>01 / LOCAL CHECK</span><strong>局所条件を、見える形に。</strong><p>.foldの完成座標から山谷線候補をつくり、川崎定理の残差を表示。これは単一頂点の局所条件であり、作品全体が物理的に折れることの保証ではありません。</p></figcaption>
-          </figure>
-          <figure>
-            <div className="figureImage goldfish"><img src={asset("/goldfish-prototype.png")} alt="Orieditaで生成した赤い平面の金魚候補" /></div>
-            <figcaption><span>02 / GOLDFISH LOOP</span><strong>見た目も、評価の対象へ。</strong><p>金魚を題材に、候補生成と視覚モデルによる評価を反復。回転や見る向きに左右されにくい基準を探っています。</p></figcaption>
-          </figure>
-          <figure>
-            <div className="figureImage roses"><img src={asset("/origami-roses.png")} alt="黄色とオレンジ色の紙で折られた二輪のバラ" /></div>
-            <figcaption><span>03 / HUMAN SENSE</span><strong>規則性と、つくる感覚。</strong><p>花のような規則性のある題材は、基本形を考えるヒントになります。人の観察と試作も、設計ループの大切な一部です。</p></figcaption>
-          </figure>
-        </div>
-      </section>
-
-      <section className="currentState" aria-labelledby="current-title">
-        <div className="currentLabel"><span>STATUS</span><strong>RESEARCH<br />PROTOTYPE</strong></div>
-        <div className="currentCopy">
-          <p className="sectionIndex">07 / NOW &amp; NEXT</p>
-          <h2 id="current-title">できたことと、<br />まだできていないこと。</h2>
-          <p>「自動生成できた」と一言でまとめず、試作済み・実験中・今後を分けて公開します。</p>
-        </div>
-        <div className="stateColumns">
-          <div className="stateDone">
-            <h3><span>●</span> NOW — 試作済み</h3>
+        <div className="scopeColumns">
+          <article>
+            <h3><i>●</i> THIS BROWSER BUILD</h3>
             <ul>
-              <li>Oriedita専用API/MCPから折線追加・保存・折り計算を操作</li>
-              <li>折り上がり形状を別枠で表示</li>
-              <li>.foldの完成座標から山谷線候補を生成</li>
-              <li>川崎残差など一部の局所条件を可視化</li>
-              <li>金魚を題材に生成と視覚評価を反復</li>
+              <li>入力文から編集可能な特徴候補を整理</li>
+              <li>seed付きで単頂点構造を96案探索</li>
+              <li>上位3候補を比較し角度を再編集</li>
+              <li>川崎残差とMaekawa本数差を計算</li>
+              <li>表示グラフをSVG／FOLDで保存</li>
             </ul>
-          </div>
-          <div className="stateNext">
-            <h3><span>○</span> NEXT — 研究課題</h3>
+          </article>
+          <article>
+            <h3><i>○</i> NEXT RESEARCH</h3>
             <ul>
-              <li>作品全体の層順・衝突・紙厚を含む折り可能性</li>
-              <li>人が実際に折りやすい手順と手数の評価</li>
-              <li>GUIに依存しない高速な実行環境</li>
-              <li>複数候補の並列生成と比較</li>
-              <li>3D完成形と幅広い題材への一般化</li>
+              <li>Orieditaによる全体の折り計算と層順</li>
+              <li>自己衝突、紙厚、指の届きやすさ</li>
+              <li>複数頂点を持つ本格的な展開図</li>
+              <li>折り上がりの2D／3Dシミュレーション</li>
+              <li>人が理解できる折り手順の自動生成</li>
             </ul>
-          </div>
-        </div>
-      </section>
-
-      <section className="watch" aria-labelledby="watch-title">
-        <div className="watchCopy">
-          <p className="sectionIndex light">08 / WATCH</p>
-          <h2 id="watch-title">発表でたどる、<br />構想から中間成果まで。</h2>
-        </div>
-        <div className="videoLinks">
-          <a href="https://youtu.be/9oekrk3Ma-g" target="_blank" rel="noreferrer"><span>01 / JUNE</span><strong>ブースト合宿発表</strong><i>↗</i></a>
-          <a href="https://youtu.be/O1axFAyN-7A" target="_blank" rel="noreferrer"><span>02 / AUGUST</span><strong>中間発表</strong><i>↗</i></a>
-        </div>
-        <p className="videoNote">※ ブースト合宿動画 0:36 付近の鶴の展開図には誤りがあることを記録ページで注記しています。</p>
-      </section>
-
-      <section className="references" aria-labelledby="references-title">
-        <div className="referencesIntro">
-          <p className="sectionIndex">09 / REFERENCES</p>
-          <h2 id="references-title">先行研究と<br />オープンソース。</h2>
-          <p>このプロジェクトは、計算折り紙の研究と公開ツールから多くを学び、その間をつなぐ方法を探っています。</p>
-        </div>
-        <div className="referenceList">
-          {researchLinks.map((link, index) => (
-            <a key={link.title} href={link.href} target="_blank" rel="noreferrer">
-              <span>{String(index + 1).padStart(2, "0")}</span><strong>{link.title}</strong><em>{link.type}</em><i>↗</i>
-            </a>
-          ))}
+          </article>
         </div>
       </section>
 
       <footer>
-        <div className="footerMark" aria-hidden="true"><span>ORI</span><i>/</i><span>AI</span></div>
+        <div className="footerBrand"><span>ORI</span><i>/</i><span>AI</span></div>
         <div className="footerCopy">
-          <p>LLMを用いた折り紙展開図作成ソフト</p>
-          <strong>MITOU JUNIOR 2026<br />YUKA ITO PROJECT</strong>
+          <p>未踏ジュニア2026 伊藤PJ「LLMを用いた折り紙展開図作成ソフト」</p>
+          <div>
+            <a href="https://scrapbox.io/mitoujr/伊藤PJ" target="_blank" rel="noreferrer">COSENSE SOURCE ↗</a>
+            <a href="https://github.com/oriedita/oriedita" target="_blank" rel="noreferrer">ORIEDITA ↗</a>
+            <a href="https://github.com/yuka-718/ito-pj-2026" target="_blank" rel="noreferrer">SOURCE CODE ↗</a>
+            <a href="#top">BACK TO TOP ↑</a>
+          </div>
         </div>
-        <div className="footerLinks">
-          <a href="https://github.com/yuka-718/ito-pj-2026" target="_blank" rel="noreferrer">GITHUB ↗</a>
-          <a href="#top">BACK TO TOP ↑</a>
-        </div>
-        <p className="footerNote">2026年5月〜8月のCosense開発記録をもとに構成。個人連絡先・非公開の会議情報は掲載していません。</p>
       </footer>
     </main>
   );

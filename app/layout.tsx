@@ -5,9 +5,9 @@ const publicUrl = "https://yuka-718.github.io/ito-pj-2026/";
 
 export const metadata: Metadata = {
   metadataBase: new URL(publicUrl),
-  title: "ORI / AI — LLMを用いた折り紙展開図作成ソフト",
+  title: "ORI AI Studio — 言葉から折り紙の構造候補へ",
   description:
-    "未踏ジュニア2026 伊藤夕夏プロジェクト。LLMと折り紙ソフトをつなぎ、創作折り紙の展開図候補を生成・検証する研究開発の記録。",
+    "つくりたい形の特徴を整理し、単頂点の折り紙構造候補を生成・局所検証・書き出しできる、未踏ジュニア2026 伊藤PJのブラウザ版研究プロトタイプ。",
   authors: [{ name: "伊藤夕夏" }],
   alternates: { canonical: publicUrl },
   icons: {
@@ -18,16 +18,16 @@ export const metadata: Metadata = {
     type: "website",
     locale: "ja_JP",
     url: publicUrl,
-    siteName: "ORI / AI",
-    title: "ORI / AI — 折り紙の「構造」を、AIと探る。",
-    description: "LLMと計算折り紙ソフトをつなぐ、未踏ジュニア2026の研究プロトタイプ。",
-    images: [{ url: "og.png", width: 1734, height: 907, alt: "ORI / AI — 折り紙の「構造」を、AIと探る。" }],
+    siteName: "ORI AI Studio",
+    title: "ORI AI Studio — 言葉から、折りの候補へ。",
+    description: "特徴を編集し、構造候補を生成・局所検証・SVG／FOLD書き出しできるブラウザ版研究プロトタイプ。",
+    images: [{ url: "og-studio.png", width: 1731, height: 909, alt: "ORI AI Studio — 言葉から、折りの候補へ。" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "ORI / AI — 折り紙の「構造」を、AIと探る。",
-    description: "LLMと計算折り紙ソフトをつなぐ、未踏ジュニア2026の研究プロトタイプ。",
-    images: ["og.png"],
+    title: "ORI AI Studio — 言葉から、折りの候補へ。",
+    description: "特徴を編集し、構造候補を生成・局所検証・SVG／FOLD書き出しできるブラウザ版研究プロトタイプ。",
+    images: ["og-studio.png"],
   },
 };
 

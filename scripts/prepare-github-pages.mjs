@@ -7,11 +7,7 @@ const textExtensions = new Set([".html", ".rsc", ".js", ".css", ".json", ""]);
 const rootPaths = [
   "/_next/",
   "/favicon.svg",
-  "/foldability-check.png",
-  "/goldfish-prototype.png",
-  "/og.png",
-  "/origami-insect.png",
-  "/origami-roses.png",
+  "/og-studio.png",
 ];
 
 async function listFiles(directory) {
@@ -51,4 +47,12 @@ for (const path of await listFiles(outputRoot)) {
 }
 
 await writeFile(join(outputRoot, ".nojekyll"), "");
+
+const indexHtml = await readFile(join(outputRoot, "index.html"), "utf8");
+if (indexHtml.includes('"/_next/') || indexHtml.includes('href="/favicon.svg')) {
+  throw new Error("GitHub Pages build still contains an unprefixed root asset URL");
+}
+if (indexHtml.includes(`${basePath}${basePath}`)) {
+  throw new Error("GitHub Pages build contains a duplicated base path");
+}
 console.log(`Prepared GitHub Pages output for ${basePath}/`);

@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
-const templateRoot = new URL("../", import.meta.url);
-
 async function render() {
   const workerUrl = new URL("../dist/server/index.js", import.meta.url);
   workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
@@ -16,29 +14,29 @@ async function render() {
   );
 }
 
-test("server-renders the finished ORI / AI site", async () => {
+test("server-renders the interactive ORI AI Studio", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="ja"/i);
-  assert.match(html, /ORI \/ AI/);
-  assert.match(html, /折り紙の/);
-  assert.match(html, /AIと探る/);
-  assert.match(html, /LLMを用いた折り紙展開図作成ソフト/);
-  assert.match(html, /RESEARCH PROTOTYPE/);
-  assert.match(html, /og\.png/);
+  assert.match(html, /ORI AI STUDIO/);
+  assert.match(html, /言葉から/);
+  assert.match(html, /折りの候補/);
+  assert.match(html, /3つの構造候補を生成/);
+  assert.match(html, /LOCAL KAWASAKI/);
+  assert.match(html, /FOLD 1\.2/);
+  assert.match(html, /作品全体の平坦折り/);
+  assert.match(html, /og-studio\.png/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
-test("contains the public assets and no starter preview", async () => {
+test("contains the social assets, static output, and no starter preview", async () => {
   await Promise.all([
-    access(new URL("../public/og.png", import.meta.url)),
-    access(new URL("../public/origami-insect.png", import.meta.url)),
-    access(new URL("../public/foldability-check.png", import.meta.url)),
-    access(new URL("../public/goldfish-prototype.png", import.meta.url)),
-    access(new URL("../public/origami-roses.png", import.meta.url)),
+    access(new URL("../public/og-studio.png", import.meta.url)),
+    access(new URL("../public/favicon.svg", import.meta.url)),
+    access(new URL("../dist/client/index.html", import.meta.url)),
   ]);
 
   await assert.rejects(access(new URL("../app/_sites-preview", import.meta.url)));
