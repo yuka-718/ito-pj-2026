@@ -88,6 +88,8 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <string>${xml(pathValue)}</string>
     <key>ORI_AI_CODEX_BIN</key>
     <string>${xml(codexPath)}</string>
+    <key>ORI_AI_MAX_ITERATIONS</key>
+    <string>10</string>
     <key>ORIEDITA_MCP_SERVER</key>
     <string>${xml(join(runtimeMcp, "server.mjs"))}</string>
     <key>ORIEDITA_JAR</key>

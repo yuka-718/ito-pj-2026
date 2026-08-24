@@ -15,7 +15,7 @@ const workRoot = resolve(projectRoot, "work", "local-jobs");
 const resultSchema = resolve(here, "result.schema.json");
 const port = Number.parseInt(process.env.ORI_AI_LOCAL_PORT ?? "8788", 10);
 const host = "127.0.0.1";
-const maxIterations = Math.min(5, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_ITERATIONS ?? "3", 10)));
+const maxIterations = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_ITERATIONS ?? "10", 10)));
 const codexModel = process.env.ORI_AI_CODEX_MODEL ?? "gpt-5.6-terra";
 const codexBin = process.env.ORI_AI_CODEX_BIN
   ?? "/Applications/ChatGPT.app/Contents/Resources/codex";
@@ -177,8 +177,9 @@ ${job.referencePath ? `- ${job.referencePath.split("/").at(-1)}: 参考画像` :
 1. Orieditaのget_statusを呼び、open_fileで input.fold を開く。
 2. foldActionを実行し、get_folded_figureで折り上がりを確認する。
 3. モチーフの特徴、輪郭、平坦折り可能性、線の明瞭さを評価する。
-4. 必要ならFOLDデータまたはOrieditaの線を修正し、再度開いて折る。最大${maxIterations}回で終了する。
-5. 最後にOriedita上へ最良案を開いた状態にし、foldActionを完了させる。
+4. 評価とfoldActionによる検証を合計${maxIterations}回、必ず実行する。各回で結果を比較し、安全に改善できる場合はFOLDデータまたはOrieditaの線を修正して再度開いて折る。
+5. 途中で十分に良い案が見つかっても終了せず、最良案を開き直してfoldActionと評価を続け、合計${maxIterations}回の検証を完了する。
+6. 最後にOriedita上へ最良案を開いた状態にし、foldActionを完了させる。JSONのiterationsには実際に実行した検証回数を記録する。
 
 制約:
 - 一枚の正方形、切断なし、接着なしを守る。
