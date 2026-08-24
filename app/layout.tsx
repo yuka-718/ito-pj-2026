@@ -11,8 +11,9 @@ export const metadata: Metadata = {
   authors: [{ name: "伊藤夕夏" }],
   alternates: { canonical: publicUrl },
   icons: {
-    icon: "favicon.svg",
-    shortcut: "favicon.svg",
+    icon: [{ url: "favicon.png", type: "image/png" }],
+    shortcut: "favicon.png",
+    apple: "favicon.png",
   },
   openGraph: {
     type: "website",

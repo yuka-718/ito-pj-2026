@@ -6,7 +6,7 @@ const basePath = "/ito-pj-2026";
 const textExtensions = new Set([".html", ".rsc", ".js", ".css", ".json", ""]);
 const rootPaths = [
   "/_next/",
-  "/favicon.svg",
+  "/favicon.png",
   "/og-studio.png",
 ];
 
@@ -49,7 +49,7 @@ for (const path of await listFiles(outputRoot)) {
 await writeFile(join(outputRoot, ".nojekyll"), "");
 
 const indexHtml = await readFile(join(outputRoot, "index.html"), "utf8");
-if (indexHtml.includes('"/_next/') || indexHtml.includes('href="/favicon.svg')) {
+if (indexHtml.includes('"/_next/') || indexHtml.includes('href="/favicon.png')) {
   throw new Error("GitHub Pages build still contains an unprefixed root asset URL");
 }
 if (indexHtml.includes(`${basePath}${basePath}`)) {
