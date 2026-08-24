@@ -196,6 +196,20 @@ export default function Home() {
 
   return (
     <main className="generatorPage">
+      <div className="dreamDecor" aria-hidden="true">
+        <div className="sparkleField">
+          {Array.from({ length: 18 }, (_, index) => <i key={index} />)}
+        </div>
+        <div className="bubbleField">
+          {Array.from({ length: 8 }, (_, index) => <i key={index} />)}
+        </div>
+        <div className="swimmingFish">
+          {/* Decorative artwork is intentionally kept as the creator's original image. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src="./dream-fish.png" alt="" draggable={false} />
+        </div>
+      </div>
+
       <header className="simpleHeader">
         <a href="./" className="simpleLogo" aria-label="ORI AI ホーム">ORI <i>/</i> AI</a>
       </header>
