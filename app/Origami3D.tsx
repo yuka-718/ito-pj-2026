@@ -83,7 +83,65 @@ function flowerMesh(): Face[] {
   return faces;
 }
 
+const knowledgeFamilies = new Set([
+  "miura_like",
+  "single_vertex_kawasaki",
+  "radial_flasher_like",
+  "square_twist_array",
+  "kresling_like",
+  "accordion_pleats",
+  "yoshimura_like",
+  "box_pleat",
+  "triangular_lattice",
+  "waterbomb_tessellation",
+  "reference_precrease",
+]);
+
+function knowledgeHeight(modelKey: string, x: number, y: number, ix: number, iy: number) {
+  const radius = Math.hypot(x, y);
+  const angle = Math.atan2(y, x);
+  if (modelKey === "miura_like") return ((ix + iy) % 2 ? .3 : -.16) + y * .08;
+  if (modelKey === "accordion_pleats") return ix % 2 ? .32 : -.2;
+  if (modelKey === "box_pleat") return ((ix % 2) + (iy % 2) - 1) * .24;
+  if (modelKey === "radial_flasher_like") return Math.sin(angle * 8 + radius * 4) * .24;
+  if (modelKey === "square_twist_array") return Math.sin((Math.abs(x) + Math.abs(y)) * 5) * .22;
+  if (modelKey === "kresling_like") return Math.sin((x * 1.2 + y) * 4.2) * .28;
+  if (modelKey === "yoshimura_like") return Math.cos(x * 4) * Math.sin(y * 4) * .25;
+  if (modelKey === "triangular_lattice") return (ix + iy) % 3 === 0 ? .28 : -.12;
+  if (modelKey === "waterbomb_tessellation") return (ix + iy) % 2 ? .34 : -.24;
+  if (modelKey === "single_vertex_kawasaki") return Math.max(-.12, .65 - radius * .42);
+  return Math.cos(radius * 4) * .16;
+}
+
+function knowledgeSurfaceMesh(modelKey: string): Face[] {
+  const cells = 7;
+  const extent = 1.72;
+  const points: Vec3[][] = Array.from({ length: cells + 1 }, (_, iy) =>
+    Array.from({ length: cells + 1 }, (_, ix) => {
+      const x = -extent + (ix / cells) * extent * 2;
+      const y = -extent + (iy / cells) * extent * 2;
+      return [x, y, knowledgeHeight(modelKey, x, y, ix, iy)];
+    }),
+  );
+  const faces: Face[] = [];
+  for (let iy = 0; iy < cells; iy += 1) {
+    for (let ix = 0; ix < cells; ix += 1) {
+      const a = points[iy][ix];
+      const b = points[iy][ix + 1];
+      const c = points[iy + 1][ix + 1];
+      const d = points[iy + 1][ix];
+      if ((ix + iy) % 2 === 0) {
+        faces.push(face(a, b, c, ix + iy), face(a, c, d, ix + iy + 2));
+      } else {
+        faces.push(face(a, b, d, ix + iy + 1), face(b, c, d, ix + iy + 3));
+      }
+    }
+  }
+  return faces;
+}
+
 function getMesh(modelKey: string) {
+  if (knowledgeFamilies.has(modelKey)) return knowledgeSurfaceMesh(modelKey);
   if (modelKey === "crane") return craneMesh();
   if (modelKey === "beetle") return beetleMesh();
   if (modelKey === "flower") return flowerMesh();

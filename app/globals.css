@@ -117,8 +117,10 @@ a { color: inherit; text-decoration: none; }
 .outputs { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 22px; }
 .outputPanel { min-width: 0; min-height: 0; margin: 0; overflow: hidden; border: 1px solid rgba(255, 255, 255, .95); border-radius: 28px; background: var(--white); box-shadow: var(--shadow); backdrop-filter: blur(18px); }
 .outputPanel h1 { margin: 0; font-size: 15px; letter-spacing: -.02em; }
-.outputPanel > h1, .modelTitle { height: 60px; padding: 0 23px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
-.outputPanel > h1::before, .modelTitle h1::before { content: "✦"; margin-right: 8px; color: var(--pink); font-size: 12px; }
+.outputPanel > h1, .outputTitle, .modelTitle { height: 60px; padding: 0 23px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
+.outputPanel > h1::before, .outputTitle h1::before, .modelTitle h1::before { content: "✦"; margin-right: 8px; color: var(--pink); font-size: 12px; }
+.outputTitle h1 { display: flex; align-items: center; }
+.outputTitle span { color: var(--pink); font: 800 8px/1 ui-monospace, "SFMono-Regular", monospace; letter-spacing: .08em; }
 .modelTitle span { font: 700 9px/1 ui-monospace, "SFMono-Regular", monospace; color: var(--muted); }
 .creaseStage, .modelStage { min-height: 0; height: min(660px, calc(100vh - 350px)); padding: 28px; display: grid; place-items: center; }
 .creaseStage { background: linear-gradient(145deg, rgba(215, 242, 249, .72), rgba(245, 224, 250, .75)); }
@@ -141,6 +143,7 @@ a { color: inherit; text-decoration: none; }
 .foldedEvidence { position: absolute; right: 18px; bottom: 18px; z-index: 2; width: clamp(104px, 23%, 176px); margin: 0; overflow: hidden; border: 4px solid rgba(255, 255, 255, .92); border-radius: 17px; background: #fff; box-shadow: 0 12px 30px rgba(137, 103, 158, .18); }
 .foldedEvidence img { display: block; width: 100%; aspect-ratio: 1.2; object-fit: contain; background: #fff; }
 .foldedEvidence figcaption { padding: 7px 9px; border-top: 1px solid var(--line); color: var(--muted); font: 800 8px/1 ui-monospace, "SFMono-Regular", monospace; letter-spacing: .09em; }
+.knowledgeEvidence { width: clamp(122px, 27%, 196px); }
 
 button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visible, label:has(input:focus-visible) {
   outline: 3px solid var(--lavender);
@@ -166,7 +169,7 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visib
   .uploadField { border-bottom: 1px solid var(--line); }
   .uploadField > label { min-height: 122px; flex-direction: row; }
   .uploadField img { width: 76px; height: 68px; }
-  .outputPanel > h1, .modelTitle { height: 52px; }
+  .outputPanel > h1, .outputTitle, .modelTitle { height: 52px; }
   .creaseStage, .modelStage { height: 92vw; padding: 15px; }
   .creasePattern { border-width: 5px; border-radius: 16px; }
   .modelCanvas { min-height: 260px; }

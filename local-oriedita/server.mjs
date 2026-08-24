@@ -9,10 +9,13 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { loadKnowledgePack, publicKnowledgeMatch, searchKnowledge } from "./knowledge-search.mjs";
+
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
 const workRoot = resolve(projectRoot, "work", "local-jobs");
 const resultSchema = resolve(here, "result.schema.json");
+const knowledgePack = await loadKnowledgePack();
 const port = Number.parseInt(process.env.ORI_AI_LOCAL_PORT ?? "8788", 10);
 const host = "127.0.0.1";
 const maxIterations = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_ITERATIONS ?? "10", 10)));
@@ -30,6 +33,7 @@ const connectionFile = resolve(
 
 const allowedOrigins = new Set([
   "https://yuka-718.github.io",
+  "https://ori-ai-ito-pj-2026.pipipiimside.chatgpt.site",
   ...(process.env.ORI_AI_ALLOWED_ORIGINS ?? "")
     .split(",")
     .map((value) => value.trim())
@@ -136,8 +140,10 @@ async function createJob(input) {
   if (queue.length >= 3) throw new HttpError(429, "処理待ちが多いため、少し待ってから再実行してください");
   const id = randomUUID();
   const directory = join(workRoot, id);
+  const knowledgeMatch = searchKnowledge(knowledgePack, input.prompt);
+  const initialFold = knowledgeMatch?.fold ?? input.fold;
   await mkdir(directory, { recursive: true, mode: 0o700 });
-  await writeFile(join(directory, "input.fold"), `${JSON.stringify(input.fold, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(directory, "input.fold"), `${JSON.stringify(initialFold, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(directory, "brief.txt"), `${input.prompt || "参考画像をもとに設計"}\n`, { mode: 0o600 });
 
   let referencePath = null;
@@ -151,6 +157,7 @@ async function createJob(input) {
     directory,
     referencePath,
     prompt: input.prompt,
+    knowledgeMatch,
     status: "queued",
     message: "処理待ち",
     createdAt: new Date().toISOString(),
@@ -166,6 +173,29 @@ async function createJob(input) {
 }
 
 function workerPrompt(job) {
+  if (job.knowledgeMatch) {
+    const match = publicKnowledgeMatch(job.knowledgeMatch);
+    return `あなたは伊藤PJの折り紙知識検索レンダラーです。検索済みの登録展開図を変更せず、Orieditaで完成状態を確認してください。
+
+検索結果:
+- title: ${match.title}
+- family: ${match.family}
+- license: ${match.license}
+- foldability: ${match.foldability}
+
+必ず行うこと:
+1. Orieditaのget_statusを呼び、open_fileで input.fold を開く。
+2. input.foldの線・頂点・割当は変更しない。
+3. foldActionを1回実行し、get_folded_figureで折り上がりを確認する。
+4. 最後に同じinput.foldをOriedita上へ開いた状態にし、foldActionを完了させる。
+5. JSONのiterationsは1、stop_reasonはknowledge_matchとする。
+
+制約:
+- 作業ディレクトリ以外のファイルは変更しない。
+- サブエージェントは使わない。
+- 実際に折れない案を折れると断定しない。
+- 最終回答は指定されたJSONスキーマだけを返す。`;
+  }
   return `あなたは伊藤PJの折り紙設計改善ワーカーです。CodexからOriedita MCPを操作し、入力展開図を評価・改善してください。
 
 作業ディレクトリ内の入力:
@@ -295,6 +325,7 @@ async function collectResult(job, evaluationPath) {
 
   return {
     evaluation,
+    knowledgeMatch: publicKnowledgeMatch(job.knowledgeMatch),
     creaseImage: `data:image/png;base64,${creaseBytes.toString("base64")}`,
     foldedImage: `data:${foldedFigure.mimeType};base64,${foldedFigure.data}`,
     foldFile: `data:application/json;base64,${foldBytes.toString("base64")}`,

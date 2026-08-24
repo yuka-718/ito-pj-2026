@@ -38,6 +38,16 @@ type Evaluation = {
 
 type OrieditaResult = {
   evaluation: Evaluation;
+  knowledgeMatch: {
+    id: string;
+    title: string;
+    family: string;
+    category: string;
+    params: Record<string, unknown>;
+    license: string;
+    foldability: string;
+    source: string;
+  } | null;
   creaseImage: string;
   foldedImage: string;
   foldFile: string;
@@ -173,8 +183,11 @@ export default function Home() {
       if (!response.ok || !payload.job) throw new Error(payload.error ?? "ローカルサーバーへ接続できませんでした");
       const result = await waitForJob(payload.job.id);
       setOrieditaResult(result);
+      if (result.knowledgeMatch) setModelKey(result.knowledgeMatch.family);
       setRunState("done");
-      setMessage(`Orieditaで${result.evaluation.iterations}回検証しました。評価${result.evaluation.score}点`);
+      setMessage(result.knowledgeMatch
+        ? `知識ベースから「${result.knowledgeMatch.title}」を表示しました`
+        : `Orieditaで${result.evaluation.iterations}回検証しました。評価${result.evaluation.score}点`);
     } catch (error) {
       setRunState("error");
       setMessage(error instanceof Error ? error.message : "ローカルサーバーへ接続できませんでした");
@@ -238,7 +251,10 @@ export default function Home() {
 
       <section className="outputs" aria-label="生成結果">
         <article className="outputPanel">
-          <h1>展開図</h1>
+          <div className="outputTitle">
+            <h1>展開図</h1>
+            {orieditaResult?.knowledgeMatch && <span>KNOWLEDGE MATCH</span>}
+          </div>
           <div className="creaseStage">
             {orieditaResult ? (
               // Oriedita returns a local data URL after the completed run.
@@ -251,15 +267,19 @@ export default function Home() {
         <article className="outputPanel">
           <div className="modelTitle">
             <h1>完成形 3D</h1>
-            <span>{orieditaResult ? `ORIEDITA SCORE ${orieditaResult.evaluation.score}` : "ドラッグで回転"}</span>
+            <span>{orieditaResult?.knowledgeMatch
+              ? orieditaResult.knowledgeMatch.title
+              : orieditaResult ? `ORIEDITA SCORE ${orieditaResult.evaluation.score}` : "ドラッグで回転"}</span>
           </div>
           <div className="modelStage">
             <Origami3D modelKey={modelKey} />
             {orieditaResult && (
-              <figure className="foldedEvidence">
+              <figure className={`foldedEvidence ${orieditaResult.knowledgeMatch ? "knowledgeEvidence" : ""}`}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={orieditaResult.foldedImage} alt="Orieditaの折り上がり検証画像" />
-                <figcaption>ORIEDITA</figcaption>
+                <figcaption>{orieditaResult.knowledgeMatch
+                  ? `${orieditaResult.knowledgeMatch.license} · ORIEDITA`
+                  : "ORIEDITA"}</figcaption>
               </figure>
             )}
           </div>
