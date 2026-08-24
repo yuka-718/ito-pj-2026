@@ -5,9 +5,9 @@ const publicUrl = "https://yuka-718.github.io/ito-pj-2026/";
 
 export const metadata: Metadata = {
   metadataBase: new URL(publicUrl),
-  title: "ORI AI Studio — 言葉から折り紙の構造候補へ",
+  title: "ORI AI — 折り紙生成プロトタイプ",
   description:
-    "つくりたい形の特徴を整理し、単頂点の折り紙構造候補を生成・局所検証・書き出しできる、未踏ジュニア2026 伊藤PJのブラウザ版研究プロトタイプ。",
+    "プロンプトと参考画像から、折り紙の展開図と完成形3Dモデルを表示する研究プロトタイプ。",
   authors: [{ name: "伊藤夕夏" }],
   alternates: { canonical: publicUrl },
   icons: {
@@ -18,15 +18,15 @@ export const metadata: Metadata = {
     type: "website",
     locale: "ja_JP",
     url: publicUrl,
-    siteName: "ORI AI Studio",
-    title: "ORI AI Studio — 言葉から、折りの候補へ。",
-    description: "特徴を編集し、構造候補を生成・局所検証・SVG／FOLD書き出しできるブラウザ版研究プロトタイプ。",
-    images: [{ url: "og-studio.png", width: 1731, height: 909, alt: "ORI AI Studio — 言葉から、折りの候補へ。" }],
+    siteName: "ORI AI",
+    title: "ORI AI — 展開図と完成形3Dを生成",
+    description: "プロンプトと参考画像を入力して、折り紙の展開図と完成形3Dモデルを表示します。",
+    images: [{ url: "og-studio.png", width: 1731, height: 909, alt: "ORI AI 折り紙生成プロトタイプ" }],
   },
   twitter: {
     card: "summary_large_image",
-    title: "ORI AI Studio — 言葉から、折りの候補へ。",
-    description: "特徴を編集し、構造候補を生成・局所検証・SVG／FOLD書き出しできるブラウザ版研究プロトタイプ。",
+    title: "ORI AI — 展開図と完成形3Dを生成",
+    description: "プロンプトと参考画像を入力して、折り紙の展開図と完成形3Dモデルを表示します。",
     images: ["og-studio.png"],
   },
 };

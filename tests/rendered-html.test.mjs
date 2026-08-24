@@ -14,20 +14,20 @@ async function render() {
   );
 }
 
-test("server-renders the interactive ORI AI Studio", async () => {
+test("server-renders the focused origami generator", async () => {
   const response = await render();
   assert.equal(response.status, 200);
   assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
 
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="ja"/i);
-  assert.match(html, /ORI AI STUDIO/);
-  assert.match(html, /言葉から/);
-  assert.match(html, /折りの候補/);
-  assert.match(html, /3つの構造候補を生成/);
-  assert.match(html, /LOCAL KAWASAKI/);
-  assert.match(html, /FOLD 1\.2/);
-  assert.match(html, /作品全体の平坦折り/);
+  assert.match(html, /ORI AI/);
+  assert.match(html, /つくりたい折り紙を入力/);
+  assert.match(html, /画像をアップロード/);
+  assert.match(html, /展開図/);
+  assert.match(html, /完成形 3D/);
+  assert.match(html, /生成する/);
+  assert.doesNotMatch(html, /WHAT THIS BUILD DOES|HONEST PROTOTYPING|CANDIDATE SCORE/);
   assert.match(html, /og-studio\.png/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
