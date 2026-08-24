@@ -112,15 +112,21 @@ a { color: inherit; text-decoration: none; }
 .bubbleField i:nth-child(7) { left: 92%; width: 15px; animation-delay: -11s; animation-duration: 16s; }
 .bubbleField i:nth-child(8) { left: 47%; width: 8px; animation-delay: -10s; animation-duration: 13s; }
 
-.swimmingFish {
+.swimmingFishTrack {
   position: absolute;
   top: clamp(70px, 10vh, 120px);
   left: 0;
   width: clamp(155px, 18vw, 265px);
   filter: drop-shadow(0 16px 20px rgba(117, 90, 157, .16)) drop-shadow(0 0 14px rgba(255, 255, 255, .72));
   transform-origin: center;
-  animation: fishSwimAcross 28s linear infinite;
+  animation: fishSwimAcross 18s linear infinite;
   will-change: transform;
+}
+.swimmingFish {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1585 / 992;
+  animation: fishBob 2.6s ease-in-out infinite;
 }
 .swimmingFish::before,
 .swimmingFish::after {
@@ -137,12 +143,57 @@ a { color: inherit; text-decoration: none; }
   box-shadow: -18px -21px 0 -3px rgba(255, 255, 255, .38);
 }
 .swimmingFish::after { top: 26%; left: -16%; width: 8px; opacity: .72; }
-.swimmingFish img {
+.swimmingFish > img {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
   display: block;
   width: 100%;
-  height: auto;
+  height: 100%;
+  object-fit: contain;
   user-select: none;
-  animation: fishBob 2.6s ease-in-out infinite;
+}
+.fishBody {
+  clip-path: polygon(0 0, 69% 0, 69% 100%, 0 100%);
+}
+.fishTail {
+  clip-path: polygon(59% 0, 100% 0, 100% 100%, 59% 100%);
+  transform-origin: 62% 58%;
+  animation: tailFlap .48s ease-in-out infinite alternate;
+  will-change: transform;
+}
+.fishTrail {
+  position: absolute;
+  z-index: 1;
+  top: 24%;
+  right: 76%;
+  width: 68%;
+  height: 58%;
+}
+.fishTrail i {
+  position: absolute;
+  right: 0;
+  width: 9px;
+  aspect-ratio: 1;
+  background: linear-gradient(135deg, #fff 10%, #ffd1ea 42%, #b4ecff 72%, #fff 100%);
+  clip-path: polygon(50% 0, 61% 38%, 100% 50%, 61% 62%, 50% 100%, 39% 62%, 0 50%, 39% 38%);
+  filter: drop-shadow(0 0 7px rgba(255, 255, 255, .95)) drop-shadow(0 0 10px rgba(226, 158, 255, .55));
+  opacity: 0;
+  animation: trailSparkle 1.55s ease-out infinite;
+}
+.fishTrail i:nth-child(1) { top: 7%; width: 8px; animation-delay: -.1s; }
+.fishTrail i:nth-child(2) { top: 30%; width: 13px; animation-delay: -.7s; }
+.fishTrail i:nth-child(3) { top: 62%; width: 7px; animation-delay: -1.2s; }
+.fishTrail i:nth-child(4) { top: 84%; width: 10px; animation-delay: -.45s; }
+.fishTrail i:nth-child(5) { top: 16%; width: 6px; animation-delay: -1.4s; }
+.fishTrail i:nth-child(6) { top: 48%; width: 9px; animation-delay: -.95s; }
+.fishTrail i:nth-child(7) { top: 73%; width: 12px; animation-delay: -.25s; }
+.fishTrail i:nth-child(8) { top: 39%; width: 6px; animation-delay: -1.3s; }
+
+@keyframes trailSparkle {
+  0% { opacity: 0; transform: translateX(24px) scale(.25) rotate(0deg); }
+  22% { opacity: 1; }
+  100% { opacity: 0; transform: translateX(-76px) scale(1.25) rotate(90deg); }
 }
 
 @keyframes dreamTwinkle {
@@ -156,14 +207,17 @@ a { color: inherit; text-decoration: none; }
   100% { opacity: 0; transform: translate3d(34px, -115vh, 0) scale(1.15); }
 }
 @keyframes fishSwimAcross {
-  0% { transform: translate3d(-32vw, 2vh, 0) scaleX(1) rotate(-2deg); }
-  48% { transform: translate3d(112vw, 13vh, 0) scaleX(1) rotate(2deg); }
-  50% { transform: translate3d(112vw, 13vh, 0) scaleX(-1) rotate(-2deg); }
-  98%, 100% { transform: translate3d(-32vw, 2vh, 0) scaleX(-1) rotate(2deg); }
+  0% { transform: translate3d(-32vw, 2vh, 0) rotate(-2deg); }
+  45% { transform: translate3d(42vw, 8vh, 0) rotate(1.5deg); }
+  100% { transform: translate3d(112vw, 13vh, 0) rotate(-1deg); }
 }
 @keyframes fishBob {
   0%, 100% { transform: translateY(-4px) rotate(-1deg); }
   50% { transform: translateY(8px) rotate(1.5deg); }
+}
+@keyframes tailFlap {
+  0% { transform: perspective(280px) rotateY(-13deg) rotate(-1.5deg) skewY(-1deg); }
+  100% { transform: perspective(280px) rotateY(15deg) rotate(2deg) skewY(1.5deg); }
 }
 
 .simpleHeader { height: 82px; display: flex; align-items: center; }
@@ -290,13 +344,13 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visib
   .creaseStage, .modelStage { height: 92vw; padding: 15px; }
   .creasePattern { border-width: 5px; border-radius: 16px; }
   .modelCanvas { min-height: 260px; }
-  .swimmingFish { top: 72px; width: 155px; animation-duration: 22s; }
+  .swimmingFishTrack { top: 72px; width: 155px; animation-duration: 15s; }
   .sparkleField i:nth-child(n+13) { display: none; }
 }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
-  .sparkleField i, .bubbleField i, .swimmingFish, .swimmingFish img, .generate::before { animation: none !important; }
+  .sparkleField i, .bubbleField i, .swimmingFishTrack, .swimmingFish, .fishTail, .fishTrail i, .generate::before { animation: none !important; }
   .bubbleField { display: none; }
-  .swimmingFish { top: 78px; right: -28px; left: auto; transform: rotate(-3deg); }
+  .swimmingFishTrack { top: 78px; right: -28px; left: auto; transform: rotate(-3deg); }
 }
