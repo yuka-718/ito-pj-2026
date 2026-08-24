@@ -17,3 +17,7 @@ scripts/deploy-oracle.sh ubuntu@203.0.113.10 203-0-113-10.sslip.io
 
 After deployment, set `NEXT_PUBLIC_ORI_AI_API_URL` to the HTTPS hostname when
 building the GitHub Pages and Sites frontends.
+
+The same HTTPS hostname exposes the purpose-built Oriedita API at
+`/v1/oriedita/*` and its OpenAPI document at `/openapi.json`. Set a long random
+`ORI_AI_API_TOKEN` in `/etc/ori-ai/ori-ai.env` before exposing these endpoints.

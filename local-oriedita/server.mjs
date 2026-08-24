@@ -1,15 +1,22 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { loadKnowledgePack, publicKnowledgeMatch, searchKnowledge } from "./knowledge-search.mjs";
+import {
+  ApiInputError,
+  createOpenApiDocument,
+  ORIEDITA_API_VERSION,
+  validateFoldDocument,
+  validateFoldRequest,
+} from "./api-contract.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
@@ -28,12 +35,15 @@ const codexBin = process.env.ORI_AI_CODEX_BIN
   ?? "/Applications/ChatGPT.app/Contents/Resources/codex";
 const orieditaMcpServer = process.env.ORIEDITA_MCP_SERVER
   ?? "/Users/yukaito/Documents/oriedita/oriedita-mcp/server.mjs";
+const orieditaJar = resolve(process.env.ORIEDITA_JAR
+  ?? "/Users/yukaito/Documents/oriedita/oriedita/target/oriedita-1.1.4-SNAPSHOT.jar");
+const orieditaJava = process.env.ORIEDITA_JAVA ?? "java";
 const userSuffix = typeof process.getuid === "function" ? process.getuid() : "user";
-const connectionFile = resolve(
-  process.env.ORIEDITA_MCP_RUNTIME_DIR
-    ?? join(tmpdir(), `oriedita-mcp-${userSuffix}`),
-  "connection.json",
-);
+const orieditaRuntime = resolve(process.env.ORIEDITA_MCP_RUNTIME_DIR
+  ?? join(tmpdir(), `oriedita-mcp-${userSuffix}`));
+const connectionFile = resolve(orieditaRuntime, "connection.json");
+const orieditaLogFile = resolve(orieditaRuntime, "oriedita-api.log");
+const apiToken = process.env.ORI_AI_API_TOKEN?.trim() ?? "";
 
 const allowedOrigins = new Set([
   "https://yuka-718.github.io",
@@ -47,6 +57,8 @@ const jobs = new Map();
 const queue = [];
 const submissionWindows = new Map();
 let activeJobId = null;
+let activeOrieditaConnection = null;
+let orieditaLaunchPromise = null;
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
@@ -57,7 +69,7 @@ function isAllowedOrigin(origin) {
 function corsHeaders(origin) {
   const headers = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Headers": "Authorization, Content-Type",
     "Access-Control-Allow-Private-Network": "true",
     "Access-Control-Max-Age": "600",
     "Cache-Control": "no-store",
@@ -118,9 +130,23 @@ class HttpError extends Error {
   }
 }
 
+function hasApiAccess(request) {
+  if (!apiToken) return true;
+  const authorization = request.headers.authorization;
+  if (typeof authorization !== "string" || !authorization.startsWith("Bearer ")) return false;
+  const provided = Buffer.from(authorization.slice(7));
+  const expected = Buffer.from(apiToken);
+  return provided.length === expected.length && timingSafeEqual(provided, expected);
+}
+
+function requireApiAccess(request) {
+  if (!hasApiAccess(request)) throw new HttpError(401, "有効なAPIトークンが必要です");
+}
+
 function publicJob(job) {
   return {
     id: job.id,
+    type: job.type,
     status: job.status,
     message: job.message,
     createdAt: job.createdAt,
@@ -137,11 +163,12 @@ function validateJobInput(value) {
   if (!prompt && !value?.referenceImage) {
     throw new HttpError(400, "プロンプトか参考画像が必要です");
   }
-  if (!fold || typeof fold !== "object" || !Array.isArray(fold.vertices_coords) || !Array.isArray(fold.edges_vertices)) {
-    throw new HttpError(400, "展開図データが不正です");
+  try {
+    validateFoldDocument(fold);
+  } catch (error) {
+    if (error instanceof ApiInputError) throw new HttpError(error.status, error.message);
+    throw error;
   }
-  const encodedFold = JSON.stringify(fold);
-  if (encodedFold.length > 1_000_000) throw new HttpError(413, "展開図データが大きすぎます");
 
   let referenceImage = null;
   if (value?.referenceImage != null) {
@@ -179,10 +206,37 @@ async function createJob(input) {
 
   const job = {
     id,
+    type: "design",
     directory,
     referencePath,
     prompt: input.prompt,
     knowledgeMatch,
+    status: "queued",
+    message: "処理待ち",
+    createdAt: new Date().toISOString(),
+    startedAt: null,
+    completedAt: null,
+    result: null,
+    error: null,
+  };
+  jobs.set(id, job);
+  queue.push(id);
+  void drainQueue();
+  return job;
+}
+
+async function createOrieditaFoldJob(input) {
+  if (queue.length >= 3) throw new HttpError(429, "処理待ちが多いため、少し待ってから再実行してください");
+  const id = randomUUID();
+  const directory = join(workRoot, id);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(join(directory, "input.fold"), `${JSON.stringify(input.fold, null, 2)}\n`, { mode: 0o600 });
+
+  const job = {
+    id,
+    type: "oriedita-fold",
+    directory,
+    waitMs: input.waitMs,
     status: "queued",
     message: "処理待ち",
     createdAt: new Date().toISOString(),
@@ -299,15 +353,16 @@ function runCodex(job) {
 }
 
 async function readConnection() {
-  const connection = JSON.parse(await readFile(connectionFile, "utf8"));
-  if (typeof connection.url !== "string" || typeof connection.token !== "string") {
-    throw new Error("Oriedita接続情報が不正です");
+  try {
+    const connection = JSON.parse(await readFile(connectionFile, "utf8"));
+    if (typeof connection.url !== "string" || typeof connection.token !== "string") return null;
+    return connection;
+  } catch {
+    return null;
   }
-  return connection;
 }
 
-async function orieditaRequest(path, options = {}) {
-  const connection = await readConnection();
+async function bridgeRequest(connection, path, options = {}) {
   const response = await fetch(`${connection.url}${path}`, {
     ...options,
     headers: {
@@ -321,6 +376,96 @@ async function orieditaRequest(path, options = {}) {
     throw new Error(payload?.error?.message ?? `Oriedita ${response.status}`);
   }
   return payload.result;
+}
+
+async function healthyConnection(connection) {
+  if (!connection) return null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1_000);
+    try {
+      const health = await bridgeRequest(connection, "/health", { signal: controller.signal });
+      return health?.ready ? connection : null;
+    } finally {
+      clearTimeout(timeout);
+    }
+  } catch {
+    return null;
+  }
+}
+
+async function launchOriedita() {
+  await Promise.all([
+    access(orieditaJar),
+    mkdir(orieditaRuntime, { recursive: true, mode: 0o700 }),
+  ]);
+  await rm(connectionFile, { force: true });
+  const token = randomBytes(32).toString("hex");
+  const log = await open(orieditaLogFile, "a", 0o600);
+  try {
+    const child = spawn(orieditaJava, ["-jar", orieditaJar], {
+      cwd: projectRoot,
+      detached: true,
+      env: {
+        ...process.env,
+        ORIEDITA_MCP_CONNECTION_FILE: connectionFile,
+        ORIEDITA_MCP_TOKEN: token,
+      },
+      stdio: ["ignore", log.fd, log.fd],
+    });
+    child.unref();
+  } finally {
+    await log.close();
+  }
+
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const connection = await readConnection();
+    if (connection?.token === token && await healthyConnection(connection)) return connection;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 150));
+  }
+  throw new Error(`Orieditaを起動できませんでした。${orieditaLogFile} を確認してください`);
+}
+
+async function ensureOriedita() {
+  const active = await healthyConnection(activeOrieditaConnection);
+  if (active) return active;
+
+  const existing = await healthyConnection(await readConnection());
+  if (existing) {
+    activeOrieditaConnection = existing;
+    return existing;
+  }
+
+  if (!orieditaLaunchPromise) {
+    orieditaLaunchPromise = launchOriedita().finally(() => {
+      orieditaLaunchPromise = null;
+    });
+  }
+  activeOrieditaConnection = await orieditaLaunchPromise;
+  return activeOrieditaConnection;
+}
+
+async function orieditaRequest(path, options = {}) {
+  const connection = await ensureOriedita();
+  try {
+    return await bridgeRequest(connection, path, options);
+  } catch (error) {
+    activeOrieditaConnection = null;
+    throw error;
+  }
+}
+
+async function inspectOriedita() {
+  const connection = await healthyConnection(activeOrieditaConnection)
+    ?? await healthyConnection(await readConnection());
+  if (!connection) return { ready: false };
+  activeOrieditaConnection = connection;
+  const health = await bridgeRequest(connection, "/health");
+  return {
+    ready: true,
+    version: health.version,
+  };
 }
 
 async function waitForFold(timeoutMs = 30_000) {
@@ -368,14 +513,72 @@ async function collectResult(job, evaluationPath) {
   };
 }
 
+async function collectOrieditaFoldResult(job) {
+  const inputPath = join(job.directory, "input.fold");
+  await orieditaRequest("/open", {
+    method: "POST",
+    body: JSON.stringify({ path: inputPath }),
+  });
+  await orieditaRequest("/action", {
+    method: "POST",
+    body: JSON.stringify({ action: "foldAction" }),
+  });
+  const state = await waitForFold(job.waitMs);
+  const activeFile = typeof state.file === "string" ? resolve(state.file) : "";
+  if (!activeFile.startsWith(`${job.directory}/`)) {
+    throw new Error("送信された展開図をOrieditaで開けませんでした");
+  }
+  if (!state.foldedFigures?.completed) {
+    throw new Error("Orieditaで折り上がりを計算できませんでした");
+  }
+
+  const finalFoldPath = join(job.directory, "final.fold");
+  const finalCreasePath = join(job.directory, "final-crease.png");
+  await orieditaRequest("/export", {
+    method: "POST",
+    body: JSON.stringify({ path: finalFoldPath }),
+  });
+  await orieditaRequest("/export", {
+    method: "POST",
+    body: JSON.stringify({ path: finalCreasePath }),
+  });
+  const [document, foldedFigure, creaseBytes, foldBytes] = await Promise.all([
+    orieditaRequest("/document"),
+    orieditaRequest("/folded-figure"),
+    readFile(finalCreasePath),
+    readFile(finalFoldPath),
+  ]);
+
+  return {
+    engine: {
+      name: "Oriedita",
+      version: state.version,
+    },
+    foldability: {
+      completed: true,
+      lineCount: document.lineCount,
+      figureCount: state.foldedFigures.count,
+    },
+    creaseImage: `data:image/png;base64,${creaseBytes.toString("base64")}`,
+    foldedImage: `data:${foldedFigure.mimeType};base64,${foldedFigure.data}`,
+    foldFile: `data:application/json;base64,${foldBytes.toString("base64")}`,
+  };
+}
+
 async function executeJob(job) {
   job.status = "running";
-  job.message = "CodexがOrieditaを操作中";
+  job.message = job.type === "oriedita-fold"
+    ? "Orieditaで折り上がりを計算中"
+    : "CodexがOrieditaを操作中";
   job.startedAt = new Date().toISOString();
   try {
-    const evaluationPath = await runCodex(job);
-    job.message = "結果を書き出し中";
-    job.result = await collectResult(job, evaluationPath);
+    if (job.type === "oriedita-fold") {
+      job.result = await collectOrieditaFoldResult(job);
+    } else {
+      const evaluationPath = await runCodex(job);
+      job.message = "結果を書き出し中";
+      job.result = await collectResult(job, evaluationPath);
+    }
     job.status = "done";
     job.message = "完了";
   } catch (error) {
@@ -412,6 +615,13 @@ async function handle(request, response) {
   }
 
   const url = new URL(request.url ?? "/", `http://${host}:${port}`);
+  const forwardedProtocol = trustProxy ? request.headers["x-forwarded-proto"] : null;
+  const protocol = typeof forwardedProtocol === "string" ? forwardedProtocol.split(",", 1)[0] : "http";
+  const serverUrl = `${protocol}://${request.headers.host ?? `${host}:${port}`}`;
+  if (request.method === "GET" && url.pathname === "/openapi.json") {
+    send(response, 200, createOpenApiDocument(serverUrl), origin);
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/health") {
     send(response, 200, {
       ok: true,
@@ -422,6 +632,43 @@ async function handle(request, response) {
         maxIterations,
       },
     }, origin);
+    return;
+  }
+  if (request.method === "GET" && url.pathname === "/v1/oriedita/health") {
+    send(response, 200, {
+      ok: true,
+      result: {
+        service: "ori-ai-oriedita-api",
+        apiVersion: ORIEDITA_API_VERSION,
+        ready: true,
+        busy: Boolean(activeJobId),
+        queued: queue.length,
+        authentication: apiToken ? "bearer" : "none",
+        oriedita: await inspectOriedita(),
+      },
+    }, origin);
+    return;
+  }
+  if (request.method === "POST" && url.pathname === "/v1/oriedita/fold") {
+    requireApiAccess(request);
+    let input;
+    try {
+      input = validateFoldRequest(await readJson(request));
+    } catch (error) {
+      if (error instanceof ApiInputError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
+    consumeSubmissionQuota(request);
+    const job = await createOrieditaFoldJob(input);
+    send(response, 202, { ok: true, job: publicJob(job) }, origin);
+    return;
+  }
+  const orieditaJobMatch = url.pathname.match(/^\/v1\/oriedita\/jobs\/([0-9a-f-]+)$/i);
+  if (request.method === "GET" && orieditaJobMatch) {
+    requireApiAccess(request);
+    const job = jobs.get(orieditaJobMatch[1]);
+    if (!job || job.type !== "oriedita-fold") throw new HttpError(404, "ジョブが見つかりません");
+    send(response, 200, { ok: true, job: publicJob(job) }, origin);
     return;
   }
   if (request.method === "POST" && url.pathname === "/jobs") {
@@ -444,7 +691,7 @@ async function handle(request, response) {
 await Promise.all([mkdir(workRoot, { recursive: true, mode: 0o700 }), access(resultSchema)]);
 const server = createServer((request, response) => {
   void handle(request, response).catch((error) => {
-    const status = error instanceof HttpError ? error.status : 500;
+    const status = error instanceof HttpError || error instanceof ApiInputError ? error.status : 500;
     const message = error instanceof Error ? error.message : "サーバーエラー";
     send(response, status, { ok: false, error: message }, request.headers.origin);
   });

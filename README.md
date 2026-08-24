@@ -40,6 +40,25 @@ CodexはOrieditaで入力 `.fold` を開き、折り上がりを評価し、最�
 ミウラ折り、水爆折り、フラッシャー、箱ひだなど登録済みの構造名が入力された場合は、
 添付コレクション由来のCC0展開図を検索し、変更せずOrieditaへ渡します。
 
+## Oriedita HTTP API
+
+ローカルワーカーには、Orieditaを直接呼び出す非同期APIも含まれます。
+
+- `GET /v1/oriedita/health` — APIとOrieditaの状態
+- `POST /v1/oriedita/fold` — FOLD形式の展開図を送信
+- `GET /v1/oriedita/jobs/{jobId}` — 状態・展開図画像・折り上がり画像を取得
+- `GET /openapi.json` — OpenAPI 3.1仕様
+
+```bash
+curl -X POST http://127.0.0.1:8788/v1/oriedita/fold \
+  -H 'Content-Type: application/json' \
+  --data-binary @request.json
+```
+
+`request.json` は `{"fold": { ...FOLD形式のJSON... }}` です。受付時に返る
+`job.id` を `/v1/oriedita/jobs/{jobId}` で取得します。公開環境では
+`ORI_AI_API_TOKEN` を設定し、`Authorization: Bearer ...` を付けます。
+
 ## Validation
 
 ```bash
