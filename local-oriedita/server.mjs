@@ -17,8 +17,12 @@ const workRoot = resolve(projectRoot, "work", "local-jobs");
 const resultSchema = resolve(here, "result.schema.json");
 const knowledgePack = await loadKnowledgePack();
 const port = Number.parseInt(process.env.ORI_AI_LOCAL_PORT ?? "8788", 10);
-const host = "127.0.0.1";
+const host = process.env.ORI_AI_LOCAL_HOST ?? "127.0.0.1";
 const maxIterations = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_ITERATIONS ?? "10", 10)));
+const jobTimeoutMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_JOB_TIMEOUT_MS ?? "1200000", 10));
+const rateWindowMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_RATE_WINDOW_MS ?? "21600000", 10));
+const maxJobsPerWindow = Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_JOBS_PER_WINDOW ?? "3", 10));
+const trustProxy = process.env.ORI_AI_TRUST_PROXY === "1";
 const codexModel = process.env.ORI_AI_CODEX_MODEL ?? "gpt-5.6-terra";
 const codexBin = process.env.ORI_AI_CODEX_BIN
   ?? "/Applications/ChatGPT.app/Contents/Resources/codex";
@@ -41,6 +45,7 @@ const allowedOrigins = new Set([
 ]);
 const jobs = new Map();
 const queue = [];
+const submissionWindows = new Map();
 let activeJobId = null;
 
 function isAllowedOrigin(origin) {
@@ -66,6 +71,26 @@ function corsHeaders(origin) {
 function send(response, status, payload, origin) {
   response.writeHead(status, corsHeaders(origin));
   response.end(JSON.stringify(payload));
+}
+
+function clientAddress(request) {
+  if (trustProxy) {
+    const forwarded = request.headers["x-forwarded-for"];
+    if (typeof forwarded === "string" && forwarded.trim()) return forwarded.split(",", 1)[0].trim();
+  }
+  return request.socket.remoteAddress ?? "unknown";
+}
+
+function consumeSubmissionQuota(request) {
+  const address = clientAddress(request);
+  if (address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1") return;
+  const now = Date.now();
+  const active = (submissionWindows.get(address) ?? []).filter((createdAt) => now - createdAt < rateWindowMs);
+  if (active.length >= maxJobsPerWindow) {
+    throw new HttpError(429, "利用回数の上限です。時間をおいて再実行してください");
+  }
+  active.push(now);
+  submissionWindows.set(address, active);
 }
 
 async function readJson(request, limit = 14 * 1024 * 1024) {
@@ -247,16 +272,27 @@ function runCodex(job) {
       env: { ...process.env, NO_COLOR: "1" },
       stdio: ["pipe", "pipe", "pipe"],
     });
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGTERM");
+      const forceKill = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      forceKill.unref();
+    }, jobTimeoutMs);
+    timeout.unref();
     child.stdout.pipe(log, { end: false });
     child.stderr.pipe(log, { end: false });
     child.stdin.end(workerPrompt(job));
     child.once("error", (error) => {
+      clearTimeout(timeout);
       log.end();
       rejectRun(error);
     });
     child.once("exit", (code, signal) => {
+      clearTimeout(timeout);
       log.end();
-      if (code === 0) resolveRun(outputPath);
+      if (timedOut) rejectRun(new Error("処理時間の上限を超えました"));
+      else if (code === 0) resolveRun(outputPath);
       else rejectRun(new Error(`Codexが終了しました (${signal ?? code ?? "unknown"})`));
     });
   });
@@ -390,6 +426,7 @@ async function handle(request, response) {
   }
   if (request.method === "POST" && url.pathname === "/jobs") {
     const input = validateJobInput(await readJson(request));
+    consumeSubmissionQuota(request);
     const job = await createJob(input);
     send(response, 202, { ok: true, job: publicJob(job) }, origin);
     return;

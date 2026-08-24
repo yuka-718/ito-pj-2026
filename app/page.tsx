@@ -61,14 +61,17 @@ type LocalJob = {
   error: string | null;
 };
 
-const localServer = "http://127.0.0.1:8788";
+const configuredApiServer = process.env.NEXT_PUBLIC_ORI_AI_API_URL?.trim();
+const apiServer = (configuredApiServer || "http://127.0.0.1:8788").replace(/\/$/, "");
+const apiIsLoopback = /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?$/.test(apiServer);
 
-function localFetch(path: string, init?: RequestInit) {
-  return fetch(`${localServer}${path}`, {
+function apiFetch(path: string, init?: RequestInit) {
+  const options = {
     ...init,
     mode: "cors",
-    targetAddressSpace: "loopback",
-  } as RequestInit & { targetAddressSpace: "loopback" });
+    ...(apiIsLoopback ? { targetAddressSpace: "loopback" as const } : {}),
+  } as RequestInit & { targetAddressSpace?: "loopback" };
+  return fetch(`${apiServer}${path}`, options);
 }
 
 function fileToDataUrl(file: File) {
@@ -83,7 +86,7 @@ function fileToDataUrl(file: File) {
 async function waitForJob(id: string) {
   for (let attempt = 0; attempt < 360; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, attempt < 4 ? 1200 : 2500));
-    const response = await localFetch(`/jobs/${id}`);
+    const response = await apiFetch(`/jobs/${id}`);
     const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
     if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理状況を取得できませんでした");
     if (payload.job.status === "done" && payload.job.result) return payload.job.result;
@@ -170,7 +173,7 @@ export default function Home() {
     setMessage("CodexがOrieditaを操作しています");
 
     try {
-      const response = await localFetch("/jobs", {
+      const response = await apiFetch("/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -180,7 +183,7 @@ export default function Home() {
         }),
       });
       const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
-      if (!response.ok || !payload.job) throw new Error(payload.error ?? "ローカルサーバーへ接続できませんでした");
+      if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理サーバーへ接続できませんでした");
       const result = await waitForJob(payload.job.id);
       setOrieditaResult(result);
       if (result.knowledgeMatch) setModelKey(result.knowledgeMatch.family);
@@ -190,7 +193,7 @@ export default function Home() {
         : `Orieditaで${result.evaluation.iterations}回検証しました。評価${result.evaluation.score}点`);
     } catch (error) {
       setRunState("error");
-      setMessage(error instanceof Error ? error.message : "ローカルサーバーへ接続できませんでした");
+      setMessage(error instanceof Error ? error.message : "処理サーバーへ接続できませんでした");
     }
   }
 

@@ -1,0 +1,29 @@
+[Unit]
+Description=ORI AI Oriedita generation API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ori-ai
+Group=ori-ai
+WorkingDirectory=/opt/ori-ai/app
+Environment=HOME=/var/lib/ori-ai
+Environment=CODEX_HOME=/var/lib/ori-ai/codex
+Environment=PATH=/opt/node/bin:/var/lib/ori-ai/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=ORI_AI_CODEX_BIN=/var/lib/ori-ai/.local/bin/codex
+Environment=ORIEDITA_MCP_SERVER=/opt/ori-ai/oriedita-mcp/server.mjs
+Environment=ORIEDITA_JAR=/opt/ori-ai/oriedita.jar
+EnvironmentFile=/etc/ori-ai/ori-ai.env
+ExecStart=/usr/bin/xvfb-run -a -s "-screen 0 1440x1000x24 -nolisten tcp" /opt/node/bin/node /opt/ori-ai/app/local-oriedita/server.mjs
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/opt/ori-ai/app/work /var/lib/ori-ai
+
+[Install]
+WantedBy=multi-user.target

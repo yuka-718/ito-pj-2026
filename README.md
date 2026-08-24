@@ -47,6 +47,12 @@ npm run build
 npm test
 ```
 
+## Oracle Cloud API
+
+公開利用時は、Oracle Cloud Always FreeのAmpere A1 VMでOrieditaとCodexを
+常時起動します。VMはHTTPSのAPIだけを公開し、OpenAI APIキーをサーバーの
+環境変数として保持します。構築手順は `deploy/oracle/README.md` にあります。
+
 ## Publishing
 
 `main` ブランチへのpushでGitHub Actionsが静的サイトをビルドし、
