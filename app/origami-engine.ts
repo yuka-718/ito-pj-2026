@@ -98,6 +98,19 @@ export const PRESETS: Preset[] = [
     ],
   },
   {
+    key: "rabbit",
+    label: "うさぎ",
+    description: "長い耳と丸い胴体、後脚と小さな尾を持つうさぎ",
+    parts: [
+      { label: "頭", importance: 5, direction: 0 },
+      { label: "長い耳", importance: 5, direction: 330 },
+      { label: "胴体", importance: 5, direction: 180 },
+      { label: "前脚", importance: 3, direction: 55 },
+      { label: "後脚", importance: 4, direction: 135 },
+      { label: "尾", importance: 3, direction: 190 },
+    ],
+  },
+  {
     key: "flower",
     label: "花",
     description: "中心から五枚の花びらが開く花",
@@ -164,6 +177,7 @@ function copyParts(parts: Omit<Part, "id">[]) {
 export function analyzeDescription(description: string) {
   const value = description.trim();
   const rules: [RegExp, string][] = [
+    [/うさぎ|ウサギ|兎|rabbit|bunny/i, "rabbit"],
     [/金魚|魚|さかな/, "goldfish"],
     [/クワガタ|カブト|昆虫|虫/, "beetle"],
     [/鶴|つる|鳥|翼/, "crane"],

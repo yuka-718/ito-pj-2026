@@ -68,6 +68,35 @@ function beetleMesh(): Face[] {
   ];
 }
 
+function rabbitMesh(): Face[] {
+  const nose: Vec3 = [1.5, 0.12, 0];
+  const headTop: Vec3 = [0.78, 0.72, 0];
+  const headBottom: Vec3 = [0.72, -0.28, 0];
+  const headFront: Vec3 = [0.72, 0.2, 0.55];
+  const headBack: Vec3 = [0.72, 0.2, -0.55];
+  const bodyRear: Vec3 = [-1.05, -0.05, 0];
+  const bodyTop: Vec3 = [-0.25, 0.62, 0];
+  const bodyBottom: Vec3 = [-0.25, -0.65, 0];
+  const bodyFront: Vec3 = [-0.25, 0, 0.7];
+  const bodyBack: Vec3 = [-0.25, 0, -0.7];
+  const earLeft: Vec3 = [0.62, 2.0, 0.3];
+  const earRight: Vec3 = [0.95, 1.92, -0.32];
+  const tail: Vec3 = [-1.75, 0.45, 0];
+  return [
+    face(nose, headTop, headFront, 5), face(nose, headFront, headBottom, 0),
+    face(nose, headBottom, headBack, 1), face(nose, headBack, headTop, 4),
+    face(headTop, bodyTop, bodyFront, 3), face(headTop, bodyFront, headFront, 0),
+    face(headBottom, headFront, bodyFront, 1), face(headBottom, bodyFront, bodyBottom, 2),
+    face(headTop, headBack, bodyBack, 5), face(headTop, bodyBack, bodyTop, 4),
+    face(bodyRear, bodyFront, bodyTop, 0), face(bodyRear, bodyBottom, bodyFront, 1),
+    face(bodyRear, bodyBack, bodyBottom, 2), face(bodyRear, bodyTop, bodyBack, 5),
+    face(headTop, earLeft, headFront, 0), face(headTop, headBack, earRight, 4),
+    face(bodyRear, tail, bodyTop, 5), face(bodyRear, bodyBack, tail, 2),
+    face(bodyBottom, [0.55, -1.15, 0.36], [0.82, -0.42, 0.15], 3),
+    face(bodyBottom, [-1.25, -1.05, -0.25], [-0.72, -0.38, -0.45], 1),
+  ];
+}
+
 function flowerMesh(): Face[] {
   const center: Vec3 = [0, 0, 0.55];
   const faces: Face[] = [];
@@ -144,6 +173,7 @@ function getMesh(modelKey: string) {
   if (knowledgeFamilies.has(modelKey)) return knowledgeSurfaceMesh(modelKey);
   if (modelKey === "crane") return craneMesh();
   if (modelKey === "beetle") return beetleMesh();
+  if (modelKey === "rabbit") return rabbitMesh();
   if (modelKey === "flower") return flowerMesh();
   return fishMesh();
 }

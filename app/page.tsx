@@ -2,7 +2,7 @@
 
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 
-import Origami3D from "./Origami3D";
+import OrigamiSimulator3D from "./OrigamiSimulator3D";
 import {
   analyzeDescription,
   candidateToFold,
@@ -34,6 +34,10 @@ type Evaluation = {
   stop_reason: string;
   summary: string;
   issues: string[];
+  mode?: string;
+  physical?: { score: number; orieditaCompleted: boolean };
+  appearance?: { score: number; rotationNormalized: boolean; dimensions: string };
+  foldability?: { score: number; layerCount: string; clearanceIsProxy: boolean };
 };
 
 type OrieditaResult = {
@@ -159,13 +163,17 @@ export default function Home() {
     }
     const analysis = analyzeDescription(prompt || image?.name || "折り紙");
     const seed = hashString(`${prompt}-${image?.name ?? ""}-${image?.size ?? 0}`);
-    const next = generateCandidates({
+    const generated = generateCandidates({
       description: prompt || image?.name || "折り紙",
       parts: analysis.parts,
       complexity: 3,
       symmetry: true,
       seed,
-    })[0];
+    });
+    const next = generated[0];
+    const folds = generated.map((item) =>
+      JSON.parse(candidateToFold(item, prompt || image?.name || "折り紙")),
+    );
     setCandidate(next);
     setModelKey(analysis.presetKey);
     setOrieditaResult(null);
@@ -179,7 +187,13 @@ export default function Home() {
         body: JSON.stringify({
           prompt: prompt.trim(),
           referenceImage: image ? await fileToDataUrl(image.file) : null,
-          fold: JSON.parse(candidateToFold(next, prompt || image?.name || "折り紙")),
+          fold: folds[0],
+          candidates: folds,
+          goal: {
+            presetKey: analysis.presetKey,
+            symmetry: true,
+            parts: analysis.parts.map(({ label, importance, direction }) => ({ label, importance, direction })),
+          },
         }),
       });
       const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
@@ -190,7 +204,7 @@ export default function Home() {
       setRunState("done");
       setMessage(result.knowledgeMatch
         ? `知識ベースから「${result.knowledgeMatch.title}」を表示しました`
-        : `Orieditaで${result.evaluation.iterations}回検証しました。評価${result.evaluation.score}点`);
+        : `${result.evaluation.iterations}段階の検証を完了しました。評価${result.evaluation.score}点`);
     } catch (error) {
       setRunState("error");
       setMessage(error instanceof Error ? error.message : "処理サーバーへ接続できませんでした");
@@ -298,7 +312,7 @@ export default function Home() {
               : orieditaResult ? `ORIEDITA SCORE ${orieditaResult.evaluation.score}` : "ドラッグで回転"}</span>
           </div>
           <div className="modelStage">
-            <Origami3D modelKey={modelKey} />
+            <OrigamiSimulator3D foldFile={orieditaResult?.foldFile ?? null} modelKey={modelKey} />
             {orieditaResult && (
               <figure className={`foldedEvidence ${orieditaResult.knowledgeMatch ? "knowledgeEvidence" : ""}`}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}

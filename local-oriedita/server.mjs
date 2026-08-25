@@ -9,7 +9,18 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { loadKnowledgePack, publicKnowledgeMatch, searchKnowledge } from "./knowledge-search.mjs";
+import {
+  loadKnowledgePack,
+  publicKnowledgeMatch,
+  publicKnowledgeReference,
+  retrieveKnowledge,
+} from "./knowledge-search.mjs";
+import {
+  buildDesignGoal,
+  mergeFinalEvaluation,
+  validateCandidatePool,
+} from "./fast-evaluation.mjs";
+import { createMountainValleyVariants } from "./fold-repair.mjs";
 import {
   ApiInputError,
   createOpenApiDocument,
@@ -170,6 +181,21 @@ function validateJobInput(value) {
     throw error;
   }
 
+  const candidates = Array.isArray(value?.candidates) && value.candidates.length
+    ? value.candidates.slice(0, 3)
+    : [fold];
+  if (Array.isArray(value?.candidates) && value.candidates.length > 3) {
+    throw new HttpError(400, "展開図候補は3件までです");
+  }
+  for (const candidate of candidates) {
+    try {
+      validateFoldDocument(candidate);
+    } catch (error) {
+      if (error instanceof ApiInputError) throw new HttpError(error.status, error.message);
+      throw error;
+    }
+  }
+
   let referenceImage = null;
   if (value?.referenceImage != null) {
     if (typeof value.referenceImage !== "string") throw new HttpError(400, "参考画像が不正です");
@@ -179,7 +205,8 @@ function validateJobInput(value) {
     if (bytes.length > 10 * 1024 * 1024) throw new HttpError(413, "参考画像は10MB以下にしてください");
     referenceImage = { mimeType: match[1], bytes };
   }
-  return { prompt, fold, referenceImage };
+  const goal = value?.goal && typeof value.goal === "object" ? value.goal : null;
+  return { prompt, fold, candidates, goal, referenceImage };
 }
 
 function extensionForMimeType(mimeType) {
@@ -192,11 +219,40 @@ async function createJob(input) {
   if (queue.length >= 3) throw new HttpError(429, "処理待ちが多いため、少し待ってから再実行してください");
   const id = randomUUID();
   const directory = join(workRoot, id);
-  const knowledgeMatch = searchKnowledge(knowledgePack, input.prompt);
-  const initialFold = knowledgeMatch?.fold ?? input.fold;
+  const knowledgeResults = retrieveKnowledge(knowledgePack, input.prompt, { limit: 3 });
+  const exactResult = knowledgeResults.find((match) => match.matchKind === "exact") ?? null;
+  const knowledgeMatch = exactResult?.pattern ?? null;
+  const candidateFolds = knowledgeMatch ? [knowledgeMatch.fold] : input.candidates;
+  const goal = buildDesignGoal(input.prompt, input.goal);
+  const preflight = validateCandidatePool(candidateFolds, goal);
+  const initialFold = candidateFolds[preflight.selectedIndex];
   await mkdir(directory, { recursive: true, mode: 0o700 });
+  await mkdir(join(directory, "iterations"), { recursive: true, mode: 0o700 });
   await writeFile(join(directory, "input.fold"), `${JSON.stringify(initialFold, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(directory, "brief.txt"), `${input.prompt || "参考画像をもとに設計"}\n`, { mode: 0o600 });
+  await writeFile(join(directory, "goal.json"), `${JSON.stringify(goal, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(directory, "candidate-evaluation.json"), `${JSON.stringify(preflight, null, 2)}\n`, { mode: 0o600 });
+  await Promise.all(candidateFolds.map((candidate, index) =>
+    writeFile(join(directory, `candidate-${String(index + 1).padStart(2, "0")}.fold`), `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600 })
+  ));
+  await Promise.all(preflight.validations.map((validation) =>
+    writeFile(
+      join(directory, "iterations", `${String(validation.index).padStart(2, "0")}-${validation.name}.json`),
+      `${JSON.stringify(validation, null, 2)}\n`,
+      { mode: 0o600 },
+    )
+  ));
+  await writeFile(join(directory, "iterations.json"), `${JSON.stringify(preflight.validations, null, 2)}\n`, { mode: 0o600 });
+
+  const knowledgeReferences = knowledgeResults.map(publicKnowledgeReference);
+  await writeFile(join(directory, "knowledge-references.json"), `${JSON.stringify(knowledgeReferences, null, 2)}\n`, { mode: 0o600 });
+  await Promise.all(knowledgeResults.map((match, index) =>
+    writeFile(
+      join(directory, `reference-${String(index + 1).padStart(2, "0")}.fold`),
+      `${JSON.stringify(match.pattern.fold, null, 2)}\n`,
+      { mode: 0o600 },
+    )
+  ));
 
   let referencePath = null;
   if (input.referenceImage) {
@@ -210,7 +266,11 @@ async function createJob(input) {
     directory,
     referencePath,
     prompt: input.prompt,
+    goal,
+    preflight,
+    candidateFolds,
     knowledgeMatch,
+    knowledgeReferences,
     status: "queued",
     message: "処理待ち",
     createdAt: new Date().toISOString(),
@@ -254,7 +314,7 @@ async function createOrieditaFoldJob(input) {
 function workerPrompt(job) {
   if (job.knowledgeMatch) {
     const match = publicKnowledgeMatch(job.knowledgeMatch);
-    return `あなたは伊藤PJの折り紙知識検索レンダラーです。検索済みの登録展開図を変更せず、Orieditaで完成状態を確認してください。
+    return `あなたは伊藤PJの最終評価担当です。検索済みの登録構造を変更せず、Orieditaで平坦折り計算を1回だけ確認してください。
 
 検索結果:
 - title: ${match.title}
@@ -266,8 +326,10 @@ function workerPrompt(job) {
 1. Orieditaのget_statusを呼び、open_fileで input.fold を開く。
 2. input.foldの線・頂点・割当は変更しない。
 3. foldActionを1回実行し、get_folded_figureで折り上がりを確認する。
-4. 最後に同じinput.foldをOriedita上へ開いた状態にし、foldActionを完了させる。
-5. JSONのiterationsは1、stop_reasonはknowledge_matchとする。
+4. get_folded_figure確認後はinput.foldを開いた状態のままにし、foldActionをもう一度実行しない。
+5. 見た目は0°・90°・180°・270°の回転を同一として評価する。
+6. この知識パックは合成構造であり、完成作品や3Dモデルだとは判定しない。
+7. JSONのiterationsは1、stop_reasonはfinal_knowledge_validationとする。
 
 制約:
 - 作業ディレクトリ以外のファイルは変更しない。
@@ -275,27 +337,31 @@ function workerPrompt(job) {
 - 実際に折れない案を折れると断定しない。
 - 最終回答は指定されたJSONスキーマだけを返す。`;
   }
-  return `あなたは伊藤PJの折り紙設計改善ワーカーです。CodexからOriedita MCPを操作し、入力展開図を評価・改善してください。
+  return `あなたは伊藤PJの折り紙最終評価担当です。高速な9項目の決定論チェックとPareto選択は完了済みです。CodexからOriedita MCPを操作し、選択案を1回だけ最終確認してください。
 
 作業ディレクトリ内の入力:
 - brief.txt: 作りたい折り紙
-- input.fold: ブラウザが作成した初期展開図
+- goal.json: モチーフの部位・向き・対称性と物理条件
+- candidate-evaluation.json: 3候補の物理・見た目・複雑さを分離した高速評価
+- knowledge-references.json と reference-*.fold: 人間の設計知識を模倣するための構造参照。完成作品ではない
+- input.fold: Pareto候補から選ばれた最終確認対象
 ${job.referencePath ? `- ${job.referencePath.split("/").at(-1)}: 参考画像` : "- 参考画像なし"}
 
 必ず行うこと:
 1. Orieditaのget_statusを呼び、open_fileで input.fold を開く。
 2. foldActionを実行し、get_folded_figureで折り上がりを確認する。
-3. モチーフの特徴、輪郭、平坦折り可能性、線の明瞭さを評価する。
-4. 評価とfoldActionによる検証を合計${maxIterations}回、必ず実行する。各回で結果を比較し、安全に改善できる場合はFOLDデータまたはOrieditaの線を修正して再度開いて折る。
-5. 途中で十分に良い案が見つかっても終了せず、最良案を開き直してfoldActionと評価を続け、合計${maxIterations}回の検証を完了する。
-6. 最後にOriedita上へ最良案を開いた状態にし、foldActionを完了させる。JSONのiterationsには実際に実行した検証回数を記録する。
+3. input.foldは変更しない。物理条件の結果はcandidate-evaluation.jsonを尊重し、見た目だけを最終採点する。
+4. goal.jsonの部位が折り上がりの輪郭で識別できるかを評価する。0°・90°・180°・270°の回転は同一として扱う。
+5. 参考画像がある場合は輪郭と部位配置を比較する。reference-*.foldを完成形の正解として扱わない。
+6. get_folded_figure確認後はinput.foldを開いた状態のままにし、foldActionをもう一度実行しない。
+7. JSONのiterationsは1、stop_reasonはfinal_oriedita_visual_judgeとする。これは全10段階中の最後の1回である。
 
 制約:
 - 一枚の正方形、切断なし、接着なしを守る。
 - 作業ディレクトリ以外のファイルは変更しない。
 - サブエージェントは使わず、この1セッションだけで完了する。
-- マウス座標操作より、open_file、add_line、perform_actionなど意味のある操作を優先する。
 - 実際に折れない案を折れると断定しない。
+- Orieditaの平坦折り画像を立体完成形や折り順の証明だと断定しない。
 - 最終回答は指定されたJSONスキーマだけを返す。`;
 }
 
@@ -478,14 +544,90 @@ async function waitForFold(timeoutMs = 30_000) {
   throw new Error("Orieditaの折り計算がタイムアウトしました");
 }
 
+async function selectOrieditaFoldableAssignment(job) {
+  const selected = job.candidateFolds[job.preflight.selectedIndex];
+  const variants = job.knowledgeMatch
+    ? [selected]
+    : createMountainValleyVariants(knowledgePack, selected, { limit: 64 });
+  if (!variants.length) throw new Error("山折り・谷折り候補を作成できませんでした");
+  const attempts = [];
+  for (let index = 0; index < variants.length; index += 1) {
+    const attemptPath = join(job.directory, `assignment-attempt-${String(index + 1).padStart(2, "0")}.fold`);
+    await writeFile(attemptPath, `${JSON.stringify(variants[index], null, 2)}\n`, { mode: 0o600 });
+    let state = null;
+    let errorMessage = null;
+    try {
+      await orieditaRequest("/open", {
+        method: "POST",
+        body: JSON.stringify({ path: attemptPath }),
+      });
+      await orieditaRequest("/action", {
+        method: "POST",
+        body: JSON.stringify({ action: "foldAction" }),
+      });
+      state = await waitForFold(15_000);
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error);
+    }
+    const completed = Boolean(state?.foldedFigures?.completed);
+    attempts.push({
+      attempt: index + 1,
+      assignment: variants[index]["mitou:assignmentRepair"]?.signature ?? null,
+      completed,
+      estimationStep: state?.foldedFigures?.estimationStep ?? null,
+      error: errorMessage,
+    });
+    if (!completed) continue;
+
+    await writeFile(join(job.directory, "input.fold"), `${JSON.stringify(variants[index], null, 2)}\n`, { mode: 0o600 });
+    job.assignmentRepair = {
+      attempts: index + 1,
+      assignment: variants[index]["mitou:assignmentRepair"]?.signature ?? null,
+      completed: true,
+    };
+    await writeFile(join(job.directory, "assignment-search.json"), `${JSON.stringify(attempts, null, 2)}\n`, { mode: 0o600 });
+    return;
+  }
+  job.assignmentRepair = { attempts: attempts.length, assignment: null, completed: false };
+  await writeFile(join(job.directory, "assignment-search.json"), `${JSON.stringify(attempts, null, 2)}\n`, { mode: 0o600 });
+  throw new Error("Orieditaで折り上がりが完了する山谷配置を見つけられませんでした");
+}
+
+async function persistFinalEvaluation(job, judge, completed, issues = []) {
+  const evaluation = mergeFinalEvaluation(job.preflight, judge, { completed, issues });
+  const finalRecord = evaluation.validations.at(-1);
+  finalRecord.metrics.assignmentSearchAttempts = job.assignmentRepair?.attempts ?? 0;
+  finalRecord.metrics.assignment = job.assignmentRepair?.assignment ?? null;
+  await Promise.all([
+    writeFile(
+      join(job.directory, "iterations", "10-oriedita_final_fold_and_visual_judge.json"),
+      `${JSON.stringify(finalRecord, null, 2)}\n`,
+      { mode: 0o600 },
+    ),
+    writeFile(
+      join(job.directory, "iterations.json"),
+      `${JSON.stringify(evaluation.validations, null, 2)}\n`,
+      { mode: 0o600 },
+    ),
+    writeFile(
+      join(job.directory, "final-evaluation.json"),
+      `${JSON.stringify(evaluation, null, 2)}\n`,
+      { mode: 0o600 },
+    ),
+  ]);
+  return evaluation;
+}
+
 async function collectResult(job, evaluationPath) {
-  const evaluation = JSON.parse(await readFile(evaluationPath, "utf8"));
+  const judge = JSON.parse(await readFile(evaluationPath, "utf8"));
   const state = await waitForFold();
   const activeFile = typeof state.file === "string" ? resolve(state.file) : "";
   if (!activeFile.startsWith(`${job.directory}/`)) {
+    await persistFinalEvaluation(job, judge, false, ["最終候補がOrieditaで開かれていません"]);
     throw new Error("Codexがこのジョブの展開図をOrieditaで開けませんでした");
   }
   if (!state.foldedFigures?.completed) {
+    await persistFinalEvaluation(job, judge, false, ["Orieditaの折り上がり計算が未完了です"]);
     throw new Error("Orieditaの折り上がり計算が完了していません");
   }
 
@@ -503,12 +645,16 @@ async function collectResult(job, evaluationPath) {
   const foldedFigure = await orieditaRequest("/folded-figure");
   const creaseBytes = await readFile(finalCreasePath);
   const foldBytes = await readFile(finalFoldPath);
+  const foldedBytes = Buffer.from(foldedFigure.data, "base64");
+  await writeFile(join(job.directory, "final-folded.png"), foldedBytes, { mode: 0o600 });
+  const evaluation = await persistFinalEvaluation(job, judge, true);
 
   return {
     evaluation,
     knowledgeMatch: publicKnowledgeMatch(job.knowledgeMatch),
+    knowledgeReferences: job.knowledgeReferences,
     creaseImage: `data:image/png;base64,${creaseBytes.toString("base64")}`,
-    foldedImage: `data:${foldedFigure.mimeType};base64,${foldedFigure.data}`,
+    foldedImage: `data:${foldedFigure.mimeType};base64,${foldedBytes.toString("base64")}`,
     foldFile: `data:application/json;base64,${foldBytes.toString("base64")}`,
   };
 }
@@ -575,6 +721,9 @@ async function executeJob(job) {
     if (job.type === "oriedita-fold") {
       job.result = await collectOrieditaFoldResult(job);
     } else {
+      job.message = "Orieditaで折れる山谷配置を探索中";
+      await selectOrieditaFoldableAssignment(job);
+      job.message = "Codexが最終評価中";
       const evaluationPath = await runCodex(job);
       job.message = "結果を書き出し中";
       job.result = await collectResult(job, evaluationPath);
