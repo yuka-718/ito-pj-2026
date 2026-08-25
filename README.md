@@ -59,6 +59,10 @@ curl -X POST http://127.0.0.1:8788/v1/oriedita/fold \
 `job.id` を `/v1/oriedita/jobs/{jobId}` で取得します。公開環境では
 `ORI_AI_API_TOKEN` を設定し、`Authorization: Bearer ...` を付けます。
 
+公開APIの固定URLは `https://ori-ai-ito-pj-2026.pipipiimside.chatgpt.site/api`
+です。公開プロキシは上記の必要なAPIパスだけをOriedita実行環境へ転送し、
+任意の画面操作やローカルファイル操作は公開しません。
+
 ## Validation
 
 ```bash
