@@ -846,5 +846,5 @@ const server = createServer((request, response) => {
   });
 });
 server.listen(port, host, () => {
-  process.stdout.write(`ORI AI local Oriedita server: http://${host}:${port}\n`);
+  process.stdout.write(`ORIAI local Oriedita server: http://${host}:${port}\n`);
 });

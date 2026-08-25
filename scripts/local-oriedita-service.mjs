@@ -43,7 +43,7 @@ function xml(value) {
 if (process.argv.includes("--uninstall")) {
   launchctl("bootout", service);
   await rm(plistPath, { force: true });
-  process.stdout.write("ORI AI local Oriedita service removed.\n");
+  process.stdout.write("ORIAI local Oriedita service removed.\n");
   process.exit(0);
 }
 
@@ -116,4 +116,4 @@ await writeFile(plistPath, plist, { mode: 0o600 });
 execFileSync("plutil", ["-lint", plistPath], { stdio: "inherit" });
 launchctl("bootstrap", domain, plistPath);
 launchctl("kickstart", "-k", service);
-process.stdout.write(`ORI AI local Oriedita service installed: ${plistPath}\n`);
+process.stdout.write(`ORIAI local Oriedita service installed: ${plistPath}\n`);

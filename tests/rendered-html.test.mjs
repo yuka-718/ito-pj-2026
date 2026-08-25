@@ -21,20 +21,20 @@ test("server-renders the focused origami generator", async () => {
 
   const html = await response.text();
   assert.match(html, /<html[^>]*lang="ja"/i);
-  assert.match(html, /ORI AI/);
+  assert.match(html, /ORIAI/);
   assert.match(html, /つくりたい折り紙を入力/);
   assert.match(html, /画像をアップロード/);
   assert.match(html, /展開図/);
   assert.match(html, /完成形 3D/);
   assert.match(html, /生成する/);
   assert.doesNotMatch(html, /WHAT THIS BUILD DOES|HONEST PROTOTYPING|CANDIDATE SCORE/);
-  assert.match(html, /og-studio\.png/);
+  assert.match(html, /og-oriai-vivid\.png/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
 });
 
 test("contains the social assets, static output, and no starter preview", async () => {
   await Promise.all([
-    access(new URL("../public/og-studio.png", import.meta.url)),
+    access(new URL("../public/og-oriai-vivid.png", import.meta.url)),
     access(new URL("../public/favicon.svg", import.meta.url)),
     access(new URL("../dist/client/index.html", import.meta.url)),
   ]);

@@ -100,7 +100,7 @@ systemctl restart caddy.service
 
 for _ in $(seq 1 60); do
   if curl -fsS http://127.0.0.1:8788/health >/dev/null; then
-    echo "ORI AI is running at https://$public_hostname"
+    echo "ORIAI is running at https://$public_hostname"
     exit 0
   fi
   sleep 2

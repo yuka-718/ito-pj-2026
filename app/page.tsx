@@ -213,31 +213,8 @@ export default function Home() {
 
   return (
     <main className="generatorPage">
-      <div className="dreamDecor" aria-hidden="true">
-        <div className="sparkleField">
-          {Array.from({ length: 18 }, (_, index) => <i key={index} />)}
-        </div>
-        <div className="bubbleField">
-          {Array.from({ length: 8 }, (_, index) => <i key={index} />)}
-        </div>
-        <div className="swimmingFishTrack">
-          <div className="swimmingFish">
-            <div className="fishTrail">
-              {Array.from({ length: 8 }, (_, index) => <i key={index} />)}
-            </div>
-            <div className="fishFacing">
-              {/* Two clipped copies let only the tail move while preserving the illustration. */}
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img className="fishBody" src="./dream-fish.png" alt="" draggable={false} />
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img className="fishTail" src="./dream-fish.png" alt="" draggable={false} />
-            </div>
-          </div>
-        </div>
-      </div>
-
       <header className="simpleHeader">
-        <a href="./" className="simpleLogo" aria-label="ORI AI ホーム">ORI <i>/</i> AI</a>
+        <a href="./" className="simpleLogo" aria-label="ORIAI ホーム">ORIAI</a>
       </header>
 
       <form className="promptArea" onSubmit={generate}>

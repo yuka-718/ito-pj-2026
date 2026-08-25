@@ -75,7 +75,7 @@ export function createOpenApiDocument(serverUrl) {
   return {
     openapi: "3.1.0",
     info: {
-      title: "ORI AI Oriedita API",
+      title: "ORIAI Oriedita API",
       version: ORIEDITA_API_VERSION,
       description: "FOLD形式の展開図をOrieditaで開き、折り上がりを計算して画像とFOLDデータを返す非同期API。",
     },
