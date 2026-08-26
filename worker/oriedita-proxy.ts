@@ -65,6 +65,7 @@ export async function resolveOrieditaUpstream(
       headers: {
         Accept: "application/vnd.github.raw+json, application/json",
         "Cache-Control": "no-cache",
+        "User-Agent": "ORIAI-tunnel-discovery",
         "X-GitHub-Api-Version": "2022-11-28",
       },
     }));
@@ -74,7 +75,8 @@ export async function resolveOrieditaUpstream(
     if (!upstream) throw new Error("invalid discovery response");
     discoveryCache = { source: discovery, upstream, expiresAt: now + 60_000 };
     return upstream;
-  } catch {
+  } catch (error) {
+    console.warn("ORIAI tunnel discovery failed", error instanceof Error ? error.message : String(error));
     return fallback ?? undefined;
   }
 }
