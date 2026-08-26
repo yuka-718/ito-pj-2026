@@ -54,7 +54,7 @@ const stepBeamWidth = Math.min(2, Math.max(1, Number.parseInt(process.env.ORI_AI
 const knowledgeSearchEnabled = false;
 const jobTimeoutMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_JOB_TIMEOUT_MS ?? "1200000", 10));
 const rateWindowMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_RATE_WINDOW_MS ?? "21600000", 10));
-const maxJobsPerWindow = Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_JOBS_PER_WINDOW ?? "3", 10));
+const maxJobsPerWindow = Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_JOBS_PER_WINDOW ?? "30", 10));
 const trustProxy = process.env.ORI_AI_TRUST_PROXY === "1";
 const groqModel = process.env.ORI_AI_GROQ_MODEL ?? DEFAULT_GROQ_MODEL;
 const groqEndpoint = process.env.ORI_AI_GROQ_ENDPOINT

@@ -224,7 +224,9 @@ export default function Home() {
 
       <form className="promptArea" onSubmit={generate}>
         <label className="promptField" htmlFor="prompt">
-          <span>つくりたい折り紙を入力</span>
+          <span className={runState === "error" ? "fieldError" : undefined}>
+            {runState === "error" ? message : "つくりたい折り紙を入力"}
+          </span>
           <textarea
             id="prompt"
             value={prompt}
@@ -265,7 +267,7 @@ export default function Home() {
         </div>
 
         <button className="generate" type="submit" disabled={runState === "running"}>
-          {runState === "running" ? "一手ずつ設計中…" : runState === "error" ? "再接続して生成" : "生成する"}
+          {runState === "running" ? "一手ずつ設計中…" : runState === "error" ? "もう一度生成" : "生成する"}
           <span>{runState === "idle" ? "→" : `${elapsedSeconds}秒`}</span>
         </button>
         <p className="srOnly" role="status" aria-live="polite">{message}</p>
