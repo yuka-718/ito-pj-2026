@@ -24,8 +24,8 @@ test("server-renders the focused origami generator", async () => {
   assert.match(html, /ORIAI/);
   assert.match(html, /つくりたい折り紙を入力/);
   assert.match(html, /画像をアップロード/);
-  assert.match(html, /展開図/);
-  assert.match(html, /完成形 3D/);
+  assert.doesNotMatch(html, /<h1>展開図<\/h1>/);
+  assert.doesNotMatch(html, /<h1>完成形 3D<\/h1>/);
   assert.match(html, /生成する/);
   assert.match(html, /つくりたい形を自由に入力/);
   assert.doesNotMatch(html, /大きな尾びれの金魚/);

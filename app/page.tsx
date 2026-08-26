@@ -156,18 +156,6 @@ export default function Home() {
       setMessage("プロンプトか画像を追加してください");
       return;
     }
-    const analysis = analyzeDescription(prompt || image?.name || "折り紙");
-    const seed = hashString(`${prompt}-${image?.name ?? ""}-${image?.size ?? 0}`);
-    const generated = generateCandidates({
-      description: prompt || image?.name || "折り紙",
-      parts: analysis.parts,
-      complexity: 3,
-      symmetry: true,
-      seed,
-    });
-    const folds = generated.map((item) =>
-      JSON.parse(candidateToFold(item, prompt || image?.name || "折り紙")),
-    );
     setOrieditaResult(null);
     setRunState("running");
     const runStartedAt = Date.now();
@@ -176,6 +164,18 @@ export default function Home() {
     setMessage("折り線を一手ずつ追加して評価します");
 
     try {
+      const analysis = analyzeDescription(prompt || image?.name || "折り紙");
+      const seed = hashString(`${prompt}-${image?.name ?? ""}-${image?.size ?? 0}`);
+      const generated = generateCandidates({
+        description: prompt || image?.name || "折り紙",
+        parts: analysis.parts,
+        complexity: 3,
+        symmetry: true,
+        seed,
+      });
+      const folds = generated.map((item) =>
+        JSON.parse(candidateToFold(item, prompt || image?.name || "折り紙")),
+      );
       const response = await apiFetch("/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -271,33 +271,29 @@ export default function Home() {
         <p className="srOnly" role="status" aria-live="polite">{message}</p>
       </form>
 
-      <section className="outputs" aria-label="生成結果">
-        <article className="outputPanel">
-          <div className="outputTitle">
-            <h1>展開図</h1>
-            {orieditaResult?.knowledgeMatch && <span>KNOWLEDGE MATCH</span>}
-          </div>
-          <div className="creaseStage">
-            {orieditaResult ? (
-              // Oriedita returns a local data URL after the completed run.
-              // eslint-disable-next-line @next/next/no-img-element
+      {runState === "done" && orieditaResult && (
+        <section className="outputs" aria-label="生成結果">
+          <article className="outputPanel">
+            <div className="outputTitle">
+              <h1>展開図</h1>
+              {orieditaResult.knowledgeMatch && <span>KNOWLEDGE MATCH</span>}
+            </div>
+            <div className="creaseStage">
+              {/* Oriedita returns a local data URL after the completed run. */}
+              {/* eslint-disable-next-line @next/next/no-img-element */}
               <img className="orieditaCrease" src={orieditaResult.creaseImage} alt="Orieditaで検証した展開図" />
-            ) : null}
-          </div>
-        </article>
+            </div>
+          </article>
 
-        <article className="outputPanel">
-          <div className="modelTitle">
-            <h1>完成形 3D</h1>
-            {orieditaResult && <span>{orieditaResult.knowledgeMatch
-              ? orieditaResult.knowledgeMatch.title
-              : `ORIEDITA SCORE ${orieditaResult.evaluation.score}`}</span>}
-          </div>
-          <div className="modelStage">
-            {orieditaResult && (
+          <article className="outputPanel">
+            <div className="modelTitle">
+              <h1>完成形 3D</h1>
+              <span>{orieditaResult.knowledgeMatch
+                ? orieditaResult.knowledgeMatch.title
+                : `ORIEDITA SCORE ${orieditaResult.evaluation.score}`}</span>
+            </div>
+            <div className="modelStage">
               <OrigamiSimulator3D foldFile={orieditaResult.foldFile} />
-            )}
-            {orieditaResult && (
               <figure className={`foldedEvidence ${orieditaResult.knowledgeMatch ? "knowledgeEvidence" : ""}`}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={orieditaResult.foldedImage} alt="Orieditaの折り上がり検証画像" />
@@ -305,10 +301,10 @@ export default function Home() {
                   ? `${orieditaResult.knowledgeMatch.license} · ORIEDITA`
                   : "ORIEDITA"}</figcaption>
               </figure>
-            )}
-          </div>
-        </article>
-      </section>
+            </div>
+          </article>
+        </section>
+      )}
     </main>
   );
 }
