@@ -11,15 +11,7 @@ import {
   type Candidate,
 } from "./origami-engine";
 
-const initialPrompt = "大きな尾びれの金魚";
-const initialAnalysis = analyzeDescription(initialPrompt);
-const initialCandidate = generateCandidates({
-  description: initialPrompt,
-  parts: initialAnalysis.parts,
-  complexity: 3,
-  symmetry: true,
-  seed: 26,
-})[0];
+const initialPrompt = "";
 
 type UploadedImage = {
   file: File;
@@ -139,8 +131,8 @@ function CreasePattern({ candidate }: { candidate: Candidate }) {
 export default function Home() {
   const [prompt, setPrompt] = useState(initialPrompt);
   const [image, setImage] = useState<UploadedImage | null>(null);
-  const [candidate, setCandidate] = useState(initialCandidate);
-  const [modelKey, setModelKey] = useState(initialAnalysis.presetKey);
+  const [candidate, setCandidate] = useState<Candidate | null>(null);
+  const [modelKey, setModelKey] = useState("custom");
   const [message, setMessage] = useState("");
   const [runState, setRunState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [orieditaResult, setOrieditaResult] = useState<OrieditaResult | null>(null);
@@ -252,7 +244,7 @@ export default function Home() {
             id="prompt"
             value={prompt}
             onChange={(event) => setPrompt(event.target.value)}
-            placeholder="例：大きな尾びれの金魚"
+            placeholder="つくりたい形を自由に入力"
             rows={3}
             maxLength={200}
           />
@@ -305,19 +297,21 @@ export default function Home() {
               // Oriedita returns a local data URL after the completed run.
               // eslint-disable-next-line @next/next/no-img-element
               <img className="orieditaCrease" src={orieditaResult.creaseImage} alt="Orieditaで検証した展開図" />
-            ) : <CreasePattern candidate={candidate} />}
+            ) : candidate ? <CreasePattern candidate={candidate} /> : null}
           </div>
         </article>
 
         <article className="outputPanel">
           <div className="modelTitle">
             <h1>完成形 3D</h1>
-            <span>{orieditaResult?.knowledgeMatch
+            {(orieditaResult || candidate) && <span>{orieditaResult?.knowledgeMatch
               ? orieditaResult.knowledgeMatch.title
-              : orieditaResult ? `ORIEDITA SCORE ${orieditaResult.evaluation.score}` : "ドラッグで回転"}</span>
+              : orieditaResult ? `ORIEDITA SCORE ${orieditaResult.evaluation.score}` : "ドラッグで回転"}</span>}
           </div>
           <div className="modelStage">
-            <OrigamiSimulator3D foldFile={orieditaResult?.foldFile ?? null} modelKey={modelKey} />
+            {(orieditaResult || candidate) && (
+              <OrigamiSimulator3D foldFile={orieditaResult?.foldFile ?? null} modelKey={modelKey} />
+            )}
             {orieditaResult && (
               <figure className={`foldedEvidence ${orieditaResult.knowledgeMatch ? "knowledgeEvidence" : ""}`}>
                 {/* eslint-disable-next-line @next/next/no-img-element */}

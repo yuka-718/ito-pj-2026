@@ -27,6 +27,9 @@ test("server-renders the focused origami generator", async () => {
   assert.match(html, /展開図/);
   assert.match(html, /完成形 3D/);
   assert.match(html, /生成する/);
+  assert.match(html, /つくりたい形を自由に入力/);
+  assert.doesNotMatch(html, /大きな尾びれの金魚/);
+  assert.doesNotMatch(html, /origamisimulator\.org/);
   assert.doesNotMatch(html, /WHAT THIS BUILD DOES|HONEST PROTOTYPING|CANDIDATE SCORE/);
   assert.match(html, /og-oriai-vivid\.png/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|react-loading-skeleton/i);
