@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const defaultPackPath = resolve(here, "..", "knowledge", "origami-cp-world", "patterns.pack.json.gz");
+const defaultLibraryPath = resolve(here, "..", "knowledge", "finished-models", "catalog.json");
+const remoteFoldCache = new Map();
 
 const FAMILY_ALIASES = [
   { family: "miura_like", aliases: ["miura", "miura ori", "ミウラ", "三浦折り", "三浦"] },
@@ -104,6 +106,41 @@ const MOTIF_PROFILES = [
   },
 ];
 
+const LIBRARY_QUERY_RULES = [
+  { family: "dragonfly", pattern: /とんぼ|トンボ|蜻蛉|dragonfly/i },
+  { family: "crane", pattern: /鶴|おりづる|つる|crane/i },
+  { family: "rabbit", pattern: /うさぎ|ウサギ|兎|rabbit|bunny/i },
+  { family: "dragon", pattern: /龍|竜|ドラゴン|dragon(?!fly)/i },
+  { family: "butterfly", pattern: /蝶|ちょう|バタフライ|butterfly|swallowtail/i },
+  { family: "penguin", pattern: /ペンギン|penguin|pinguin/i },
+  { family: "frog", pattern: /蛙|かえる|カエル|frog/i },
+  { family: "turtle", pattern: /亀|かめ|カメ|turtle|tortoise/i },
+  { family: "fish", pattern: /金魚|魚|さかな|fish|taiyaki/i },
+  { family: "dog", pattern: /犬|いぬ|イヌ|dog/i },
+  { family: "cat", pattern: /猫|ねこ|ネコ|cat/i },
+  { family: "bird", pattern: /鳥|とり|バード|bird/i },
+  { family: "boat", pattern: /船|ふね|ボート|boat|sailboat/i },
+  { family: "heart", pattern: /ハート|心|heart/i },
+  { family: "flower", pattern: /花|バラ|チューリップ|flower|rose|tulip/i },
+  { family: "crab", pattern: /蟹|かに|カニ|crab/i },
+  { family: "insect", pattern: /昆虫|虫|カブトムシ|クワガタ|beetle|insect|kabuto|scorpion|mantis/i },
+  { family: "bat", pattern: /蝙蝠|コウモリ|(?:^|\s)bat(?:$|\s)/i },
+  { family: "elephant", pattern: /象|ゾウ|elephant/i },
+  { family: "horse", pattern: /馬|うま|ウマ|horse/i },
+  { family: "deer", pattern: /鹿|しか|シカ|deer|stag/i },
+  { family: "snake", pattern: /蛇|へび|ヘビ|snake|serpent/i },
+  { family: "box", pattern: /箱|はこ|ボックス|box/i },
+  { family: "envelope", pattern: /封筒|ふうとう|envelope/i },
+  { family: "star", pattern: /星|ほし|スター|star/i },
+];
+
+const NUMBER_WORDS = new Map([
+  ["one", 1], ["two", 2], ["three", 3], ["four", 4], ["five", 5],
+  ["six", 6], ["seven", 7], ["eight", 8], ["nine", 9], ["ten", 10],
+  ["一", 1], ["二", 2], ["三", 3], ["四", 4], ["五", 5],
+  ["六", 6], ["七", 7], ["八", 8], ["九", 9], ["十", 10],
+]);
+
 function normalize(value) {
   return value.normalize("NFKC").toLowerCase().replace(/[\s_\-・]+/g, " ").trim();
 }
@@ -123,6 +160,49 @@ function explicitFamily(query) {
 
 function motifProfile(query) {
   return MOTIF_PROFILES.find(({ pattern }) => pattern.test(query)) ?? null;
+}
+
+function requestedHeadCount(query) {
+  const digits = query.match(/(\d+)\s*(?:つの?)?\s*(?:頭|ヘッド|heads?|headed)/i)
+    ?? query.match(/(\d+)\s*[- ]?headed/i);
+  if (digits) return Number.parseInt(digits[1], 10);
+  for (const [word, count] of NUMBER_WORDS) {
+    if (new RegExp(`${word}\\s*(?:つの?)?\\s*(?:頭|ヘッド|heads?|headed)`, "i").test(query)
+      || new RegExp(`${word}[- ]headed`, "i").test(query)) return count;
+  }
+  return null;
+}
+
+function rankLibraryModels(models, query, limit) {
+  const rule = LIBRARY_QUERY_RULES.find(({ pattern }) => pattern.test(query));
+  if (!rule) return [];
+  const headCount = requestedHeadCount(query);
+  return models
+    .filter((model) => model.family === rule.family)
+    .filter((model) => headCount == null || model.head_count === headCount)
+    .map((model) => {
+      const title = normalize(model.title);
+      const exactTitle = query.includes(title) || title.includes(query);
+      const traditional = /traditional/i.test(model.title);
+      const simple = /(?:^|[ _-])simple(?:$|[ _-])/i.test(model.title);
+      const base = /(?:^|[ _-])(?:base|cp)(?:$|[ _-])/i.test(model.title);
+      const preferredSource = model.source === "origamimagiro/flat-folder";
+      return {
+        model,
+        score: (exactTitle ? 200 : 0)
+          + (model.is_finished_model ? 80 : 0)
+          + (traditional ? 30 : 0)
+          + (simple ? 10 : 0)
+          + (preferredSource ? 20 : 0)
+          - (base ? 25 : 0)
+          - model.title.length * 0.2
+          - Math.log2(Math.max(2, model.remote_bytes ?? 2)),
+        tie: hashString(`${query}:${model.id}`),
+      };
+    })
+    .sort((a, b) => b.score - a.score || a.tie - b.tie)
+    .slice(0, limit)
+    .map(({ model }) => model);
 }
 
 function numericConstraints(query, family) {
@@ -193,12 +273,22 @@ function resolveReference(pack, spec, query) {
   return rankFamily(pack, spec.family, query, spec.params, 1)[0] ?? null;
 }
 
-export async function loadKnowledgePack(packPath = defaultPackPath) {
-  const compressed = await readFile(packPath);
+export async function loadKnowledgePack(packPath = defaultPackPath, libraryPath = defaultLibraryPath) {
+  const [compressed, libraryRaw] = await Promise.all([
+    readFile(packPath),
+    readFile(libraryPath, "utf8"),
+  ]);
   const pack = JSON.parse(gunzipSync(compressed).toString("utf8"));
   if (pack.format !== "ori-ai-knowledge-pack-v1" || !Array.isArray(pack.patterns)) {
     throw new Error("折り紙知識パックの形式が不正です");
   }
+  const library = JSON.parse(libraryRaw);
+  if (library.format !== "ori-ai-fold-library-v1" || !Array.isArray(library.models)) {
+    throw new Error("完成作品FOLDライブラリの形式が不正です");
+  }
+  pack.finishedModels = library.models;
+  pack.finishedModelCount = library.model_count;
+  pack.finishedModelSources = library.sources;
   return pack;
 }
 
@@ -206,6 +296,15 @@ export function retrieveKnowledge(pack, query, { limit = 3 } = {}) {
   const normalizedQuery = normalize(query ?? "");
   if (!normalizedQuery) return [];
   const family = explicitFamily(normalizedQuery);
+  const libraryModels = family ? [] : rankLibraryModels(pack.finishedModels ?? [], normalizedQuery, 1);
+  if (libraryModels.length) {
+    return libraryModels.map((pattern) => ({
+      pattern,
+      matchKind: "exact",
+      profile: pattern.family,
+      reason: `公開FOLDライブラリの「${pattern.title}」に一致`,
+    }));
+  }
   const profile = motifProfile(normalizedQuery);
 
   // The synthetic corpus contains structures, not finished animals or flowers.
@@ -261,8 +360,10 @@ export function publicKnowledgeMatch(pattern, details = {}) {
     license: pattern.license,
     foldability: pattern.foldability,
     sourceKind: pattern.source_kind ?? "generated_cc0",
-    source: "Origami CP World Collection 2026-08-24",
-    isFinishedModel: false,
+    source: pattern.source ?? "Origami CP World Collection 2026-08-24",
+    sourceUrl: pattern.source_url ?? null,
+    author: pattern.author ?? null,
+    isFinishedModel: pattern.is_finished_model ?? false,
     ...details,
   };
 }
@@ -274,4 +375,39 @@ export function publicKnowledgeReference(match) {
     profile: match.profile,
     reason: match.reason,
   });
+}
+
+function flattenFoldFrame(document) {
+  if (Array.isArray(document.vertices_coords) && Array.isArray(document.edges_vertices)) return document;
+  const frame = document.file_frames?.find((candidate) =>
+    Array.isArray(candidate?.vertices_coords) && Array.isArray(candidate?.edges_vertices));
+  if (!frame) throw new Error("FOLDデータに頂点・辺がありません");
+  return { ...document, ...frame };
+}
+
+export async function materializeKnowledgePattern(pattern, { fetchImpl = fetch } = {}) {
+  if (pattern?.fold) return pattern;
+  if (pattern?.source_kind !== "remote_open_fold" || typeof pattern.fold_url !== "string") {
+    throw new Error("取得可能なFOLDデータではありません");
+  }
+  const url = new URL(pattern.fold_url);
+  if (url.protocol !== "https:" || url.hostname !== "raw.githubusercontent.com" || !url.pathname.endsWith(".fold")) {
+    throw new Error("許可されていないFOLD取得先です");
+  }
+  if ((pattern.remote_bytes ?? 0) > 5 * 1024 * 1024) throw new Error("FOLDデータが大きすぎます");
+  if (remoteFoldCache.has(url.href)) return { ...pattern, fold: remoteFoldCache.get(url.href) };
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const response = await fetchImpl(url, { signal: controller.signal, redirect: "error" });
+    if (!response.ok) throw new Error(`FOLDデータの取得に失敗しました (${response.status})`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.byteLength > 5 * 1024 * 1024) throw new Error("FOLDデータが大きすぎます");
+    const document = flattenFoldFrame(JSON.parse(new TextDecoder().decode(bytes)));
+    remoteFoldCache.set(url.href, document);
+    return { ...pattern, fold: document };
+  } finally {
+    clearTimeout(timeout);
+  }
 }

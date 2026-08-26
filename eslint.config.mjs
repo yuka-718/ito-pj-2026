@@ -13,6 +13,7 @@ const eslintConfig = defineConfig([
     "dist/**",
     "out/**",
     "build/**",
+    "public/origami-simulator/**",
     "next-env.d.ts",
   ]),
   eslint.configs.recommended,

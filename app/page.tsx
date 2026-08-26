@@ -59,7 +59,15 @@ type LocalJob = {
   message: string;
   result: OrieditaResult | null;
   error: string | null;
-  progress?: { cycle: number; maxCycles: number; bestScore: number | null } | null;
+  progress?: {
+    cycle: number;
+    maxCycles: number;
+    bestScore: number | null;
+    step?: number;
+    maxSteps?: number;
+    evaluatedNodes?: number;
+    mode?: string;
+  } | null;
 };
 
 const configuredApiServer = process.env.NEXT_PUBLIC_ORI_AI_API_URL?.trim();
@@ -202,7 +210,7 @@ export default function Home() {
     const runStartedAt = Date.now();
     setStartedAt(runStartedAt);
     setElapsedSeconds(0);
-    setMessage("生成→評価→再生成を開始します");
+    setMessage("折り線を一手ずつ追加して評価します");
 
     try {
       const response = await apiFetch("/jobs", {
@@ -223,9 +231,11 @@ export default function Home() {
       const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
       if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理サーバーへ接続できませんでした");
       const result = await waitForJob(payload.job.id, (job) => {
-        if (job.progress?.cycle) {
+        if (job.progress?.step || job.progress?.cycle) {
+          const step = job.progress.step ?? job.progress.cycle;
+          const maximum = job.progress.maxSteps ?? job.progress.maxCycles;
           const best = job.progress.bestScore == null ? "" : `・現在の最高${job.progress.bestScore}点`;
-          setMessage(`生成→評価→再生成 ${job.progress.cycle}/${job.progress.maxCycles}${best}`);
+          setMessage(`折り線を一手ずつ追加・評価 ${step}/${maximum}${best}`);
         }
       });
       setOrieditaResult(result);
@@ -235,7 +245,7 @@ export default function Home() {
       setRunState("done");
       setMessage(result.knowledgeMatch
         ? `知識ベースから「${result.knowledgeMatch.title}」を表示しました`
-        : `${result.evaluation.iterations}サイクル完了。最良評価${result.evaluation.score}点`);
+        : `${result.evaluation.iterations}手の追加・評価が完了。最良評価${result.evaluation.score}点`);
     } catch (error) {
       setElapsedSeconds(Math.max(1, Math.floor((Date.now() - runStartedAt) / 1000)));
       setStartedAt(null);
@@ -293,7 +303,7 @@ export default function Home() {
         </div>
 
         <button className="generate" type="submit" disabled={runState === "running"}>
-          {runState === "running" ? "生成・評価中…" : runState === "error" ? "再接続して生成" : "生成する"}
+          {runState === "running" ? "一手ずつ設計中…" : runState === "error" ? "再接続して生成" : "生成する"}
           <span>{runState === "idle" ? "→" : `${elapsedSeconds}秒`}</span>
         </button>
         <p className="srOnly" role="status" aria-live="polite">{message}</p>

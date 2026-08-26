@@ -1,0 +1,29 @@
+html,
+body,
+#threeContainer {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+}
+
+body {
+    background: #fff;
+}
+
+body > :not(#threeContainer) {
+    display: none !important;
+}
+
+#threeContainer {
+    position: fixed;
+    inset: 0;
+    display: block !important;
+}
+
+#threeContainer canvas {
+    display: block;
+    width: 100% !important;
+    height: 100% !important;
+    touch-action: none;
+}

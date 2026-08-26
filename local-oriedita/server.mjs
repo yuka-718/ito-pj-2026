@@ -2,7 +2,7 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { access, copyFile, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, copyFile, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   loadKnowledgePack,
+  materializeKnowledgePattern,
   publicKnowledgeMatch,
   publicKnowledgeReference,
   retrieveKnowledge,
@@ -22,6 +23,12 @@ import {
 import { createMountainValleyVariants } from "./fold-repair.mjs";
 import { foldGeometrySignature, regenerateCandidatePool } from "./regeneration.mjs";
 import { DEFAULT_GROQ_MODEL, requestGroqEvaluation } from "./groq-evaluator.mjs";
+import {
+  fallbackStepJudgements,
+  requestGroqStepEvaluation,
+} from "./groq-step-evaluator.mjs";
+import { evaluatePartialFold } from "./partial-evaluation.mjs";
+import { runStepSearch } from "./step-search.mjs";
 import {
   ApiInputError,
   createOpenApiDocument,
@@ -39,6 +46,12 @@ const host = process.env.ORI_AI_LOCAL_HOST ?? "127.0.0.1";
 const maxIterations = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_ITERATIONS ?? "10", 10)));
 const maxCycles = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_CYCLES ?? String(maxIterations), 10)));
 const targetScore = Math.min(100, Math.max(1, Number.parseInt(process.env.ORI_AI_TARGET_SCORE ?? "85", 10)));
+const designMode = process.env.ORI_AI_DESIGN_MODE === "regeneration"
+  ? "regeneration"
+  : "crease_step_search";
+const stepBranchFactor = Math.min(3, Math.max(1, Number.parseInt(process.env.ORI_AI_STEP_BRANCH_FACTOR ?? "2", 10)));
+const stepBeamWidth = Math.min(2, Math.max(1, Number.parseInt(process.env.ORI_AI_STEP_BEAM_WIDTH ?? "1", 10)));
+const knowledgeSearchEnabled = false;
 const jobTimeoutMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_JOB_TIMEOUT_MS ?? "1200000", 10));
 const rateWindowMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_RATE_WINDOW_MS ?? "21600000", 10));
 const maxJobsPerWindow = Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_JOBS_PER_WINDOW ?? "3", 10));
@@ -186,6 +199,10 @@ function publicJob(job) {
       cycle: job.cycle ?? 0,
       maxCycles: job.maxCycles ?? maxCycles,
       bestScore: job.bestScore ?? null,
+      step: job.step ?? job.cycle ?? 0,
+      maxSteps: job.maxSteps ?? job.maxCycles ?? maxCycles,
+      evaluatedNodes: job.evaluatedNodes ?? 0,
+      mode: job.designMode ?? designMode,
     } : null,
   };
 }
@@ -241,9 +258,20 @@ async function createJob(input) {
   if (queue.length >= 3) throw new HttpError(429, "処理待ちが多いため、少し待ってから再実行してください");
   const id = randomUUID();
   const directory = join(workRoot, id);
-  const knowledgeResults = retrieveKnowledge(knowledgePack, input.prompt, { limit: 3 });
+  // Search-result substitution is paused until every catalog entry has a
+  // verified crease pattern and matching final 3D state.
+  const knowledgeResults = knowledgeSearchEnabled
+    ? retrieveKnowledge(knowledgePack, input.prompt, { limit: 3 })
+    : [];
   const exactResult = knowledgeResults.find((match) => match.matchKind === "exact") ?? null;
-  const knowledgeMatch = exactResult?.pattern ?? null;
+  let knowledgeMatch = null;
+  if (exactResult) {
+    try {
+      knowledgeMatch = await materializeKnowledgePattern(exactResult.pattern);
+    } catch (error) {
+      console.warn(`FOLDライブラリの取得に失敗したため生成へ切り替えます: ${error instanceof Error ? error.message : error}`);
+    }
+  }
   const candidateFolds = knowledgeMatch ? [knowledgeMatch.fold] : input.candidates;
   const goal = buildDesignGoal(input.prompt, input.goal);
   const preflight = validateCandidatePool(candidateFolds, goal);
@@ -267,9 +295,11 @@ async function createJob(input) {
   ));
   await writeFile(join(directory, "iterations.json"), `${JSON.stringify(preflight.validations, null, 2)}\n`, { mode: 0o600 });
 
-  const knowledgeReferences = knowledgeResults.map(publicKnowledgeReference);
+  const resolvedKnowledgeResults = knowledgeResults.map((match) =>
+    match === exactResult && knowledgeMatch ? { ...match, pattern: knowledgeMatch } : match);
+  const knowledgeReferences = resolvedKnowledgeResults.map(publicKnowledgeReference);
   await writeFile(join(directory, "knowledge-references.json"), `${JSON.stringify(knowledgeReferences, null, 2)}\n`, { mode: 0o600 });
-  await Promise.all(knowledgeResults.map((match, index) =>
+  await Promise.all(resolvedKnowledgeResults.filter((match) => match.pattern.fold).map((match, index) =>
     writeFile(
       join(directory, `reference-${String(index + 1).padStart(2, "0")}.fold`),
       `${JSON.stringify(match.pattern.fold, null, 2)}\n`,
@@ -295,7 +325,11 @@ async function createJob(input) {
     knowledgeMatch,
     knowledgeReferences,
     cycle: 0,
+    step: 0,
     maxCycles: knowledgeMatch ? 1 : maxCycles,
+    maxSteps: knowledgeMatch ? 1 : maxCycles,
+    evaluatedNodes: 0,
+    designMode,
     bestScore: null,
     status: "queued",
     message: "処理待ち",
@@ -691,7 +725,7 @@ function bestCycleRecord(records) {
   )[0] ?? null;
 }
 
-async function runDesignLoop(job) {
+async function runRegenerationLoop(job) {
   let candidateFolds = job.candidateFolds;
   let feedback = [];
   let stopReason = "max_cycles_reached";
@@ -790,6 +824,394 @@ async function runDesignLoop(job) {
   return result;
 }
 
+function stepNodeDirectory(job, nodeId) {
+  return join(job.directory, "steps", "nodes", nodeId);
+}
+
+function documentPaperBounds(document) {
+  const lines = Array.isArray(document?.lines) ? document.lines : [];
+  const boundary = lines.filter(({ color }) => color === "EDGE");
+  const source = boundary.length ? boundary : lines;
+  const points = source.flatMap((line) => [line?.a, line?.b]).filter((point) =>
+    Number.isFinite(Number(point?.x)) && Number.isFinite(Number(point?.y)));
+  if (points.length < 4) throw new Error("Orieditaの紙面座標を取得できませんでした");
+  const xs = points.map(({ x }) => Number(x));
+  const ys = points.map(({ y }) => Number(y));
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  if (maxX - minX <= 1e-9 || maxY - minY <= 1e-9) throw new Error("Orieditaの紙面寸法が不正です");
+  return { minX, maxX, minY, maxY, width: maxX - minX, height: maxY - minY };
+}
+
+function mapPaperPoint(point, bounds) {
+  return [
+    bounds.minX + Number(point[0]) * bounds.width,
+    bounds.minY + Number(point[1]) * bounds.height,
+  ];
+}
+
+async function ensureNodeFoldSnapshot(job, node) {
+  const directory = stepNodeDirectory(job, node.id);
+  const path = join(directory, "state.fold");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, `${JSON.stringify(node.fold, null, 2)}\n`, { mode: 0o600 });
+  node.artifacts ??= {};
+  node.artifacts.foldPath = path;
+  return path;
+}
+
+async function ensureParentPreview(job, parent) {
+  if (typeof parent.artifacts?.foldedPng === "string") return;
+  const screenshot = await orieditaRequest("/screenshot?target=canvas");
+  if (!screenshot?.data || !screenshot?.mimeType) throw new Error("親状態のプレビューを取得できませんでした");
+  const directory = stepNodeDirectory(job, parent.id);
+  const path = join(directory, "folded.png");
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  await writeFile(path, Buffer.from(screenshot.data, "base64"), { mode: 0o600 });
+  parent.artifacts ??= {};
+  parent.artifacts.foldedPng = path;
+  parent.artifacts.foldedMimeType = screenshot.mimeType;
+}
+
+async function simulateCreaseStep(job, { id, parent, action, depth, goal }) {
+  const directory = stepNodeDirectory(job, id);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const parentPath = await ensureNodeFoldSnapshot(job, parent);
+  await orieditaRequest("/open", {
+    method: "POST",
+    body: JSON.stringify({ path: parentPath }),
+  });
+  await ensureParentPreview(job, parent);
+  const before = await orieditaRequest("/document");
+  const bounds = documentPaperBounds(before);
+  const [a, b] = [mapPaperPoint(action.a, bounds), mapPaperPoint(action.b, bounds)];
+  await orieditaRequest("/line", {
+    method: "POST",
+    body: JSON.stringify({
+      ax: a[0],
+      ay: a[1],
+      bx: b[0],
+      by: b[1],
+      color: action.assignment === "V" ? "VALLEY" : "MOUNTAIN",
+    }),
+  });
+
+  const foldPath = join(directory, "state.fold");
+  const creasePath = join(directory, "crease.png");
+  await orieditaRequest("/export", {
+    method: "POST",
+    body: JSON.stringify({ path: foldPath }),
+  });
+  await orieditaRequest("/export", {
+    method: "POST",
+    body: JSON.stringify({ path: creasePath }),
+  });
+  const fold = JSON.parse(await readFile(foldPath, "utf8"));
+  const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
+  let completed = false;
+  let state = null;
+  let foldedPath = null;
+  let foldedMimeType = "image/png";
+  if (calculation?.started) {
+    state = await waitForFold(30_000);
+    completed = Boolean(state?.foldedFigures?.completed);
+    if (completed) {
+      const folded = await orieditaRequest("/folded-figure");
+      foldedPath = join(directory, "folded.png");
+      foldedMimeType = folded.mimeType;
+      await writeFile(foldedPath, Buffer.from(folded.data, "base64"), { mode: 0o600 });
+    }
+  }
+
+  const partial = evaluatePartialFold({
+    fold,
+    goal,
+    action,
+    orieditaCompleted: completed,
+    targetCreaseCount: job.maxSteps,
+    finalStep: depth >= job.maxSteps,
+  });
+  const hardFailures = partial.checks
+    .filter(({ status }) => status === "fail")
+    .flatMap(({ issues, name }) => issues?.length ? issues : [name]);
+  if (Number(calculation?.violationCount) > 0) {
+    hardFailures.push(`局所平坦折り違反 ${calculation.violationCount}件`);
+  }
+  const physical = {
+    completed,
+    hardFailures: [...new Set(hardFailures)],
+    score: partial.scores.physical,
+    foldabilityScore: partial.scores.foldability,
+    checks: partial.checks,
+    structure: partial.structure,
+    violationCount: Number(calculation?.violationCount) || 0,
+    stateType: partial.stateType,
+    actionKind: partial.actionKind,
+    physicalScope: partial.physicalScope,
+    sequentialPhysicalFolding: partial.sequentialPhysicalFolding,
+    sequenceFeasibility: partial.sequenceFeasibility,
+  };
+  const artifacts = {
+    foldPath,
+    creasePng: creasePath,
+    foldedPng: foldedPath,
+    foldedMimeType,
+  };
+  await Promise.all([
+    writeFile(join(directory, "action.json"), `${JSON.stringify(action, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(directory, "physical.json"), `${JSON.stringify(physical, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(directory, "document.json"), `${JSON.stringify(await orieditaRequest("/document"), null, 2)}\n`, { mode: 0o600 }),
+  ]);
+  return { fold, physical, artifacts };
+}
+
+function evaluationImagePath(imagePath) {
+  if (process.platform !== "darwin") return imagePath;
+  const resizedPath = imagePath.replace(/(\.[^.]+)$/i, "-evaluation$1");
+  if (resizedPath === imagePath) return imagePath;
+  try {
+    execFileSync("/usr/bin/sips", ["-Z", "512", imagePath, "--out", resizedPath], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return resizedPath;
+  } catch {
+    return imagePath;
+  }
+}
+
+async function stepCandidatePayload(node) {
+  const imagePath = node.artifacts?.foldedPng ?? node.artifacts?.creasePng;
+  if (typeof imagePath !== "string") throw new Error(`候補${node.id}の比較画像がありません`);
+  const resizedPath = evaluationImagePath(imagePath);
+  return {
+    id: node.id,
+    foldedImage: {
+      mimeType: node.artifacts?.foldedMimeType ?? "image/png",
+      data: (await readFile(resizedPath)).toString("base64"),
+    },
+    actionSummary: node.action ? {
+      type: node.action.type,
+      assignment: node.action.assignment,
+      segment: { a: node.action.a, b: node.action.b },
+      construction: node.action.construction,
+    } : { type: "root_square" },
+    physicalSummary: {
+      score: node.physical?.score ?? 0,
+      foldabilityScore: node.physical?.foldabilityScore ?? 0,
+      priorTargetScore: node.target?.score ?? 0,
+      hardFailures: node.physical?.hardFailures ?? [],
+      physicalScope: node.physical?.physicalScope ?? "oriedita_flat_fold_2d",
+    },
+  };
+}
+
+async function stepReferenceImage(job) {
+  if (!job.referencePath) return null;
+  const extension = job.referencePath.split(".").at(-1)?.toLowerCase();
+  const mimeType = extension === "jpg" || extension === "jpeg"
+    ? "image/jpeg"
+    : extension === "webp" ? "image/webp" : "image/png";
+  return {
+    mimeType,
+    data: (await readFile(evaluationImagePath(job.referencePath))).toString("base64"),
+  };
+}
+
+async function judgeCreaseStepCandidates(job, { candidates, goal, manifest }) {
+  const byParent = new Map();
+  for (const candidate of candidates) {
+    const siblings = byParent.get(candidate.parentId) ?? [];
+    siblings.push(candidate);
+    byParent.set(candidate.parentId, siblings);
+  }
+  const referenceImage = await stepReferenceImage(job);
+  const judgements = [];
+  for (const [parentId, siblings] of byParent) {
+    const parent = manifest.nodes[parentId];
+    const parentPayload = await stepCandidatePayload(parent);
+    const chunkSize = referenceImage ? 1 : 2;
+    for (let offset = 0; offset < siblings.length; offset += chunkSize) {
+      const siblingNodes = siblings.slice(offset, offset + chunkSize);
+      const siblingPayloads = await Promise.all(siblingNodes.map(stepCandidatePayload));
+      let evaluated;
+      try {
+        evaluated = (await requestGroqStepEvaluation({
+          apiKey: groqApiKey,
+          model: groqModel,
+          endpoint: groqEndpoint,
+          prompt: job.prompt,
+          goal,
+          step: siblingNodes[0]?.depth ?? 1,
+          parent: parentPayload,
+          siblings: siblingPayloads,
+          referenceImage,
+          includeParentImage: false,
+          timeoutMs: Math.min(jobTimeoutMs, 120_000),
+        })).judgements;
+      } catch (error) {
+        console.warn(`一手評価を決定論fallbackへ切り替えます: ${error instanceof Error ? error.message : error}`);
+        evaluated = fallbackStepJudgements({ parent: parentPayload, siblings: siblingPayloads, goal });
+      }
+      const byId = new Map(evaluated.map((entry) => [entry.id, entry]));
+      for (const sibling of siblingNodes) {
+        const judgement = byId.get(sibling.id);
+        if (judgement) judgements.push(judgement);
+      }
+    }
+  }
+  return judgements;
+}
+
+function publicStepRecord(node) {
+  return {
+    cycle: node.depth,
+    step: node.depth,
+    status: node.status,
+    score: Math.round(node.target?.score ?? 0),
+    physical: Math.round(node.physical?.score ?? 0),
+    appearance: Math.round(node.target?.silhouetteScore ?? node.target?.score ?? 0),
+    foldability: Math.round(node.physical?.foldabilityScore ?? 0),
+    selectedCandidate: node.id,
+    issues: node.target?.issues ?? [],
+    action: node.action,
+  };
+}
+
+async function finalizeStepSearchResult(job, search) {
+  const best = search.bestNode;
+  if (!best?.fold || best.depth < 1) throw new Error("一手ずつの探索で有効な折り線を追加できませんでした");
+  const sourcePath = await ensureNodeFoldSnapshot(job, best);
+  await orieditaRequest("/open", {
+    method: "POST",
+    body: JSON.stringify({ path: sourcePath }),
+  });
+  const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
+  if (!calculation?.started) throw new Error("最終候補に局所平坦折り違反があります");
+  const state = await waitForFold(30_000);
+  if (!state?.foldedFigures?.completed) throw new Error("最終候補の2D平坦折り計算が完了しませんでした");
+
+  const finalFoldPath = join(job.directory, "final.fold");
+  const finalCreasePath = join(job.directory, "final-crease.png");
+  await orieditaRequest("/export", {
+    method: "POST",
+    body: JSON.stringify({ path: finalFoldPath }),
+  });
+  await orieditaRequest("/export", {
+    method: "POST",
+    body: JSON.stringify({ path: finalCreasePath }),
+  });
+  const foldedFigure = await orieditaRequest("/folded-figure");
+  const foldedBytes = Buffer.from(foldedFigure.data, "base64");
+  await writeFile(join(job.directory, "final-folded.png"), foldedBytes, { mode: 0o600 });
+  const pathNodes = search.bestPath.map(({ nodeId }) => search.manifest.nodes[nodeId]);
+  const cycles = pathNodes.map(publicStepRecord);
+  const evaluation = {
+    score: Math.round(best.target?.score ?? 0),
+    iterations: search.bestPath.length,
+    stop_reason: search.stopReason,
+    summary: best.target?.summary ?? `${search.bestPath.length}手の折り線追加と評価を完了しました`,
+    issues: best.target?.issues ?? [],
+    mode: "crease_by_crease_evaluation_search",
+    physical: {
+      score: Math.round(best.physical?.score ?? 0),
+      orieditaCompleted: true,
+      scope: "oriedita_flat_fold_2d",
+    },
+    appearance: {
+      score: Math.round(best.target?.silhouetteScore ?? best.target?.score ?? 0),
+      rotationNormalized: true,
+      dimensions: "2d_folded_figure",
+    },
+    foldability: {
+      score: Math.round(best.physical?.foldabilityScore ?? 0),
+      layerCount: "unknown",
+      clearanceIsProxy: true,
+    },
+    maxCycles: job.maxSteps,
+    targetScore,
+    bestCycle: best.depth,
+    cycles,
+    steps: cycles,
+    search: {
+      schema: search.manifest.schema,
+      evaluatedNodes: search.manifest.evaluatedNodes,
+      branches: Math.max(0, Object.keys(search.manifest.nodes).length - 1),
+      rollbacks: search.manifest.rollbackCount,
+      bestPath: search.bestPath,
+      stateType: "crease_pattern_prefix",
+      actionKind: "add_crease",
+      physicalScope: "oriedita_flat_fold_2d",
+      sequentialPhysicalFolding: false,
+      sequenceFeasibility: "unverified",
+    },
+  };
+  await Promise.all([
+    writeFile(join(job.directory, "final-evaluation.json"), `${JSON.stringify(evaluation, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(job.directory, "generation-loop.json"), `${JSON.stringify({
+      stopReason: search.stopReason,
+      bestNodeId: best.id,
+      bestPath: search.bestPath,
+      cycles,
+    }, null, 2)}\n`, { mode: 0o600 }),
+  ]);
+  const [creaseBytes, foldBytes] = await Promise.all([
+    readFile(finalCreasePath),
+    readFile(finalFoldPath),
+  ]);
+  return {
+    evaluation,
+    knowledgeMatch: publicKnowledgeMatch(job.knowledgeMatch),
+    knowledgeReferences: job.knowledgeReferences,
+    creaseImage: `data:image/png;base64,${creaseBytes.toString("base64")}`,
+    foldedImage: `data:${foldedFigure.mimeType};base64,${foldedBytes.toString("base64")}`,
+    foldFile: `data:application/json;base64,${foldBytes.toString("base64")}`,
+  };
+}
+
+async function runStepDesignLoop(job) {
+  const stepsDirectory = join(job.directory, "steps");
+  await mkdir(join(stepsDirectory, "nodes"), { recursive: true, mode: 0o700 });
+  const source = job.candidateFolds[job.preflight.selectedIndex];
+  const persist = async ({ event, node, manifest }) => {
+    if (node?.fold) await ensureNodeFoldSnapshot(job, node);
+    if (node?.target && node.depth > 0) {
+      const directory = stepNodeDirectory(job, node.id);
+      await mkdir(directory, { recursive: true, mode: 0o700 });
+      await writeFile(join(directory, "evaluation.json"), `${JSON.stringify({
+        target: node.target,
+        physical: node.physical,
+        status: node.status,
+      }, null, 2)}\n`, { mode: 0o600 });
+    }
+    await appendFile(join(stepsDirectory, "events.ndjson"), `${JSON.stringify(event)}\n`, { mode: 0o600 });
+    await writeFile(join(stepsDirectory, "tree.json"), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 });
+    job.step = Math.max(job.step ?? 0, Number(node?.depth) || 0);
+    job.cycle = job.step;
+    job.evaluatedNodes = manifest.evaluatedNodes;
+    job.bestScore = manifest.nodes[manifest.bestNodeId]?.target?.score ?? null;
+    job.message = `折り線を一手ずつ追加・評価 ${job.step}/${job.maxSteps}`;
+  };
+  const search = await runStepSearch({
+    rootFold: source,
+    goal: job.goal,
+    maxDepth: job.maxSteps,
+    branchFactor: stepBranchFactor,
+    beamWidth: stepBeamWidth,
+    targetScore,
+    simulate: (input) => simulateCreaseStep(job, input),
+    judge: (input) => judgeCreaseStepCandidates(job, input),
+    persist,
+  });
+  return finalizeStepSearchResult(job, search);
+}
+
+async function runDesignLoop(job) {
+  if (job.knowledgeMatch || job.designMode === "regeneration") return runRegenerationLoop(job);
+  return runStepDesignLoop(job);
+}
+
 async function collectOrieditaFoldResult(job) {
   const inputPath = join(job.directory, "input.fold");
   await orieditaRequest("/open", {
@@ -846,7 +1268,9 @@ async function executeJob(job) {
   job.status = "running";
   job.message = job.type === "oriedita-fold"
     ? "Orieditaで折り上がりを計算中"
-    : "Orieditaで折り上げ、Groqが評価中";
+    : job.designMode === "crease_step_search"
+      ? "折り線を一手ずつ追加し、OrieditaとGroqで評価中"
+      : "Orieditaで折り上げ、Groqが評価中";
   job.startedAt = new Date().toISOString();
   try {
     if (job.type === "oriedita-fold") {
@@ -907,6 +1331,9 @@ async function handle(request, response) {
         maxIterations,
         maxCycles,
         targetScore,
+        designMode,
+        stepSearch: { maxSteps: maxCycles, branchFactor: stepBranchFactor, beamWidth: stepBeamWidth },
+        knowledgeSearch: knowledgeSearchEnabled,
         evaluator: { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
       },
     }, origin);
@@ -924,6 +1351,9 @@ async function handle(request, response) {
         authentication: apiToken ? "bearer" : "none",
         maxCycles,
         targetScore,
+        designMode,
+        stepSearch: { maxSteps: maxCycles, branchFactor: stepBranchFactor, beamWidth: stepBeamWidth },
+        knowledgeSearch: knowledgeSearchEnabled,
         evaluator: { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
         oriedita: await inspectOriedita(),
       },
