@@ -164,3 +164,26 @@ test("stops on target score and returns an ancestry-ordered best path", async ()
   assert.ok(result.bestNode.target.score >= 75);
   assert.equal(result.bestNode.status, "goal");
 });
+
+test("returns a generated crease when visual scores are unavailable", async () => {
+  const result = await runStepSearch({
+    maxDepth: 1,
+    branchFactor: 2,
+    beamWidth: 1,
+    enumerateActions: limitedActions,
+    simulate: async ({ parent, action }) => ({
+      fold: simulatedFold(parent, action),
+      physical: { completed: true, score: 80, foldabilityScore: 70, hardFailures: [] },
+    }),
+    judge: async ({ candidates }) => candidates.map((candidate) => ({
+      id: candidate.id,
+      targetScore: 0,
+      silhouetteScore: 0,
+      issues: ["画像評価は未実施です"],
+    })),
+  });
+
+  assert.equal(result.bestNode.depth, 1);
+  assert.equal(result.bestPath.length, 1);
+  assert.notEqual(result.manifest.bestNodeId, result.manifest.rootNodeId);
+});

@@ -90,8 +90,9 @@ function responseRows(value) {
 
 function groqRetryDelayMs(response, payload) {
   if (response?.status !== 429) return null;
-  const retryAfter = Number(response.headers?.get?.("retry-after"));
-  if (Number.isFinite(retryAfter) && retryAfter >= 0) {
+  const retryAfterValue = response.headers?.get?.("retry-after");
+  const retryAfter = Number(retryAfterValue);
+  if (retryAfterValue != null && retryAfterValue !== "" && Number.isFinite(retryAfter) && retryAfter >= 0) {
     return Math.min(30_000, Math.max(100, Math.ceil(retryAfter * 1_000) + 250));
   }
   const message = typeof payload?.error?.message === "string" ? payload.error.message : "";
@@ -282,7 +283,10 @@ export async function requestGroqStepEvaluation({
       payload = await response.json().catch(() => null);
       if (response.ok) break;
       const delayMs = groqRetryDelayMs(response, payload);
-      if (delayMs == null || attempt === 2) break;
+      // Keep the interactive run moving. Short bursts can recover on one
+      // retry, while minute/day quota waits are handled by the deterministic
+      // fallback in the design loop.
+      if (delayMs == null || delayMs > 2_000 || attempt === 2) break;
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   } catch (error) {

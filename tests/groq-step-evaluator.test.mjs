@@ -214,6 +214,26 @@ test("retries a Groq rate limit using the server-provided delay", async () => {
   assert.equal(result.judgements[1].deltaFromParent, 10);
 });
 
+test("does not wait through a long Groq quota window", async () => {
+  let calls = 0;
+  await assert.rejects(
+    requestGroqStepEvaluation({
+      apiKey: "test-key",
+      parent: candidate("parent"),
+      siblings: [candidate("child")],
+      goal,
+      fetchImpl: async () => {
+        calls += 1;
+        return Response.json({ error: { message: "Rate limit reached. Please try again in 30s" } }, {
+          status: 429,
+        });
+      },
+    }),
+    /Rate limit reached/,
+  );
+  assert.equal(calls, 1);
+});
+
 test("provides a pure conservative fallback without pretending to see the silhouette", () => {
   const input = {
     parent: {

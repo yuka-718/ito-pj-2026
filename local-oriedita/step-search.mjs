@@ -334,7 +334,11 @@ export async function runStepSearch({
       }
       frontier = survivors;
       manifest.frontierIds = survivors.map(({ id }) => id);
-      const bestCandidate = [...survivors, manifest.nodes[manifest.bestNodeId]].sort(compareNodes)[0];
+      const incumbent = manifest.nodes[manifest.bestNodeId];
+      // The boundary-only root is not a generated result. Once a viable
+      // crease exists, always keep at least one generated node as the best so
+      // an unavailable visual judge cannot make finalization fail at depth 0.
+      const bestCandidate = (incumbent.depth === 0 ? survivors : [...survivors, incumbent]).sort(compareNodes)[0];
       manifest.bestNodeId = bestCandidate.id;
       manifest.bestPath = buildBestPath(manifest);
       await emit("select", {

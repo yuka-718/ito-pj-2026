@@ -1037,7 +1037,9 @@ async function judgeCreaseStepCandidates(job, { candidates, goal, manifest }) {
       const siblingNodes = siblings.slice(offset, offset + chunkSize);
       const siblingPayloads = await Promise.all(siblingNodes.map(stepCandidatePayload));
       let evaluated;
-      try {
+      if (job.stepEvaluatorUnavailable) {
+        evaluated = fallbackStepJudgements({ parent: parentPayload, siblings: siblingPayloads, goal });
+      } else try {
         evaluated = (await requestGroqStepEvaluation({
           apiKey: groqApiKey,
           model: groqModel,
@@ -1052,6 +1054,7 @@ async function judgeCreaseStepCandidates(job, { candidates, goal, manifest }) {
           timeoutMs: Math.min(jobTimeoutMs, 120_000),
         })).judgements;
       } catch (error) {
+        job.stepEvaluatorUnavailable = true;
         console.warn(`一手評価を決定論fallbackへ切り替えます: ${error instanceof Error ? error.message : error}`);
         evaluated = fallbackStepJudgements({ parent: parentPayload, siblings: siblingPayloads, goal });
       }
