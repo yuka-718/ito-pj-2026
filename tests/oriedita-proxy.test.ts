@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { isOrieditaApiRequest, proxyOrieditaRequest } from "../worker/oriedita-proxy.ts";
+import {
+  isOrieditaApiRequest,
+  proxyOrieditaRequest,
+  resolveOrieditaUpstream,
+} from "../worker/oriedita-proxy.ts";
 
 test("recognizes only the stable public API prefix", () => {
   assert.equal(isOrieditaApiRequest(new URL("https://site.example/api/jobs")), true);
@@ -32,4 +36,22 @@ test("does not expose arbitrary upstream paths", async () => {
     "https://engine.example",
   );
   assert.equal(response.status, 404);
+});
+
+test("discovers the current tunnel and falls back when discovery is unavailable", async () => {
+  const discovered = await resolveOrieditaUpstream(
+    "https://registry.example/oriedita.json",
+    "https://old-engine.example",
+    async () => Response.json({ url: "https://current-engine.example/ignored-path" }),
+    100_000,
+  );
+  assert.equal(discovered, "https://current-engine.example");
+
+  const fallback = await resolveOrieditaUpstream(
+    "https://another-registry.example/oriedita.json",
+    "https://fallback-engine.example",
+    async () => new Response("unavailable", { status: 503 }),
+    200_000,
+  );
+  assert.equal(fallback, "https://fallback-engine.example");
 });

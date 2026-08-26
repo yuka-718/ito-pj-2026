@@ -1,7 +1,7 @@
 /** Cloudflare Worker entry point for the vinext-starter template. */
 import { handleImageOptimization, DEFAULT_DEVICE_SIZES, DEFAULT_IMAGE_SIZES } from "vinext/server/image-optimization";
 import handler from "vinext/server/app-router-entry";
-import { isOrieditaApiRequest, proxyOrieditaRequest } from "./oriedita-proxy";
+import { isOrieditaApiRequest, proxyOrieditaRequest, resolveOrieditaUpstream } from "./oriedita-proxy";
 
 interface Env {
   ASSETS: Fetcher;
@@ -14,6 +14,7 @@ interface Env {
     };
   };
   ORIEDITA_UPSTREAM_URL?: string;
+  ORIEDITA_DISCOVERY_URL?: string;
 }
 
 interface ExecutionContext {
@@ -32,7 +33,11 @@ const worker = {
     const url = new URL(request.url);
 
     if (isOrieditaApiRequest(url)) {
-      return proxyOrieditaRequest(request, env.ORIEDITA_UPSTREAM_URL);
+      const upstream = await resolveOrieditaUpstream(
+        env.ORIEDITA_DISCOVERY_URL,
+        env.ORIEDITA_UPSTREAM_URL,
+      );
+      return proxyOrieditaRequest(request, upstream);
     }
 
     if (url.pathname === "/_vinext/image") {

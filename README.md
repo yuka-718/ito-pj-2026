@@ -74,6 +74,10 @@ curl -X POST http://127.0.0.1:8788/v1/oriedita/fold \
 です。公開プロキシは上記の必要なAPIパスだけをOriedita実行環境へ転送し、
 任意の画面操作やローカルファイル操作は公開しません。
 
+検証用Macの公開トンネルは `npm run local:tunnel:install` で常駐します。
+トンネルURLが失効した場合は自動的に再作成してruntimeブランチへ通知するため、
+サイト側の接続先を手作業で更新する必要はありません。
+
 ## Validation
 
 ```bash

@@ -2,6 +2,14 @@ export const ORIEDITA_API_PREFIX = "/api";
 
 type FetchLike = (request: Request) => Promise<Response>;
 
+type DiscoveryCache = {
+  source: string;
+  upstream: string;
+  expiresAt: number;
+};
+
+let discoveryCache: DiscoveryCache | null = null;
+
 const ALLOWED_ROUTES = [
   { method: "GET", pattern: /^\/health$/ },
   { method: "POST", pattern: /^\/jobs$/ },
@@ -23,6 +31,48 @@ function json(status: number, payload: object) {
 export function isOrieditaApiRequest(url: URL) {
   return url.pathname === ORIEDITA_API_PREFIX
     || url.pathname.startsWith(`${ORIEDITA_API_PREFIX}/`);
+}
+
+function validHttpsOrigin(value: unknown) {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:") return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveOrieditaUpstream(
+  discoveryValue: string | undefined,
+  fallbackValue: string | undefined,
+  fetcher: FetchLike = fetch,
+  now = Date.now(),
+) {
+  const fallback = validHttpsOrigin(fallbackValue);
+  const discovery = validHttpsOrigin(discoveryValue);
+  if (!discovery) return fallback ?? undefined;
+  if (discoveryCache?.source === discovery && discoveryCache.expiresAt > now) {
+    return discoveryCache.upstream;
+  }
+
+  try {
+    const registryUrl = new URL(discoveryValue!);
+    registryUrl.searchParams.set("refresh", String(Math.floor(now / 10_000)));
+    const response = await fetcher(new Request(registryUrl, {
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+    }));
+    if (!response.ok) throw new Error("discovery unavailable");
+    const payload = await response.json() as { url?: unknown };
+    const upstream = validHttpsOrigin(payload.url);
+    if (!upstream) throw new Error("invalid discovery response");
+    discoveryCache = { source: discovery, upstream, expiresAt: now + 10_000 };
+    return upstream;
+  } catch {
+    return fallback ?? undefined;
+  }
 }
 
 export async function proxyOrieditaRequest(
