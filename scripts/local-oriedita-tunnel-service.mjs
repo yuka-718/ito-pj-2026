@@ -17,6 +17,7 @@ const launchAgents = join(homedir(), "Library", "LaunchAgents");
 const logs = join(homedir(), "Library", "Logs", "ORI-AI");
 const plistPath = join(launchAgents, `${label}.plist`);
 const supervisor = join(projectRoot, "scripts", "oriedita-tunnel-supervisor.mjs");
+const localtunnel = join(projectRoot, "node_modules", ".bin", "lt");
 
 function commandPath(name, fallback) {
   try {
@@ -60,7 +61,9 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <key>ORI_AI_CLOUDFLARED</key><string>${xml(cloudflared)}</string>
     <key>ORI_AI_GH</key><string>${xml(gh)}</string>
     <key>ORI_AI_SSH</key><string>${xml(ssh)}</string>
-    <key>ORI_AI_TUNNEL_PROVIDER</key><string>localhost-run</string>
+    <key>ORI_AI_LOCALTUNNEL</key><string>${xml(localtunnel)}</string>
+    <key>ORI_AI_LOCALTUNNEL_SUBDOMAIN</key><string>oriai-ito-pj-2026</string>
+    <key>ORI_AI_TUNNEL_PROVIDER</key><string>localtunnel</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

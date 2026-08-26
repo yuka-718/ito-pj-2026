@@ -1,16 +1,19 @@
 #!/usr/bin/env node
 
 import { execFileSync, spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const cloudflared = process.env.ORI_AI_CLOUDFLARED ?? "/opt/homebrew/bin/cloudflared";
 const ssh = process.env.ORI_AI_SSH ?? "/usr/bin/ssh";
-const provider = process.env.ORI_AI_TUNNEL_PROVIDER ?? "localhost-run";
+const localtunnel = process.env.ORI_AI_LOCALTUNNEL ?? fileURLToPath(new URL("../node_modules/.bin/lt", import.meta.url));
+const localtunnelSubdomain = process.env.ORI_AI_LOCALTUNNEL_SUBDOMAIN ?? "oriai-ito-pj-2026";
+const provider = process.env.ORI_AI_TUNNEL_PROVIDER ?? "localtunnel";
 const gh = process.env.ORI_AI_GH ?? "/opt/homebrew/bin/gh";
 const registryRepo = process.env.ORI_AI_TUNNEL_REGISTRY_REPO ?? "yuka-718/oriai";
 const registryBranch = process.env.ORI_AI_TUNNEL_REGISTRY_BRANCH ?? "runtime";
 const registryPath = process.env.ORI_AI_TUNNEL_REGISTRY_PATH ?? "oriedita-upstream.json";
 const localHealth = process.env.ORI_AI_LOCAL_HEALTH ?? "http://127.0.0.1:8788/health";
-const tunnelUrlPattern = /https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9-]+\.lhr\.life)/gi;
+const tunnelUrlPattern = /https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9-]+\.lhr\.life|[a-z0-9-]+\.loca\.lt)/gi;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -60,19 +63,27 @@ async function healthy(url, timeoutMs = 10_000) {
 }
 
 function startTunnel() {
-  const command = provider === "cloudflare" ? cloudflared : ssh;
-  const argumentsList = provider === "cloudflare" ? [
-    "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", localHealth.replace(/\/health$/, ""),
-  ] : [
-    "-T",
-    "-o", "BatchMode=yes",
-    "-o", "StrictHostKeyChecking=accept-new",
-    "-o", "ServerAliveInterval=30",
-    "-o", "ServerAliveCountMax=3",
-    "-o", "ExitOnForwardFailure=yes",
-    "-R", "80:127.0.0.1:8788",
-    "nokey@localhost.run",
-  ];
+  let command;
+  let argumentsList;
+  if (provider === "cloudflare") {
+    command = cloudflared;
+    argumentsList = ["tunnel", "--no-autoupdate", "--protocol", "http2", "--url", localHealth.replace(/\/health$/, "")];
+  } else if (provider === "localtunnel") {
+    command = localtunnel;
+    argumentsList = ["--port", "8788", "--subdomain", localtunnelSubdomain];
+  } else {
+    command = ssh;
+    argumentsList = [
+      "-T",
+      "-o", "BatchMode=yes",
+      "-o", "StrictHostKeyChecking=accept-new",
+      "-o", "ServerAliveInterval=30",
+      "-o", "ServerAliveCountMax=3",
+      "-o", "ExitOnForwardFailure=yes",
+      "-R", "80:127.0.0.1:8788",
+      "nokey@localhost.run",
+    ];
+  }
   const child = spawn(command, argumentsList, { stdio: ["ignore", "pipe", "pipe"] });
   let buffer = "";
   let settled = false;
@@ -104,7 +115,7 @@ function startTunnel() {
     child.once("exit", (code, signal) => {
       if (!settled) {
         settled = true;
-        reject(new Error(`cloudflared exited before publishing a URL (${code ?? signal})`));
+        reject(new Error(`tunnel exited before publishing a URL (${code ?? signal})`));
       }
     });
   });
@@ -117,7 +128,7 @@ async function supervise() {
     try {
       const url = await Promise.race([
         urlPromise,
-        delay(45_000).then(() => { throw new Error("cloudflared URL timeout"); }),
+        delay(45_000).then(() => { throw new Error("tunnel URL timeout"); }),
       ]);
       let ready = false;
       for (let attempt = 0; attempt < 30 && child.exitCode == null; attempt += 1) {
