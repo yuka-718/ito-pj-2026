@@ -186,6 +186,34 @@ test("can compare siblings without resending the parent image", async () => {
   assert.equal(result.judgements[1].deltaFromParent, 15);
 });
 
+test("retries a Groq rate limit using the server-provided delay", async () => {
+  let calls = 0;
+  const result = await requestGroqStepEvaluation({
+    apiKey: "test-key",
+    parent: candidate("parent"),
+    siblings: [candidate("child")],
+    goal,
+    fetchImpl: async () => {
+      calls += 1;
+      if (calls === 1) {
+        return Response.json({ error: { message: "Rate limit reached. Please try again in 0.001s" } }, {
+          status: 429,
+        });
+      }
+      return Response.json({
+        choices: [{ message: { content: JSON.stringify({
+          judgements: [
+            { id: "parent", targetScore: 10, partScores: {}, silhouetteScore: 10 },
+            { id: "child", targetScore: 20, partScores: {}, silhouetteScore: 20 },
+          ],
+        }) } }],
+      });
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.judgements[1].deltaFromParent, 10);
+});
+
 test("provides a pure conservative fallback without pretending to see the silhouette", () => {
   const input = {
     parent: {

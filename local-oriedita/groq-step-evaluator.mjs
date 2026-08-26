@@ -88,6 +88,18 @@ function responseRows(value) {
   throw new Error("Groqの一手評価結果がJSON配列ではありません");
 }
 
+function groqRetryDelayMs(response, payload) {
+  if (response?.status !== 429) return null;
+  const retryAfter = Number(response.headers?.get?.("retry-after"));
+  if (Number.isFinite(retryAfter) && retryAfter >= 0) {
+    return Math.min(30_000, Math.max(100, Math.ceil(retryAfter * 1_000) + 250));
+  }
+  const message = typeof payload?.error?.message === "string" ? payload.error.message : "";
+  const match = message.match(/try again in\s+([0-9.]+)s/i);
+  if (!match) return null;
+  return Math.min(30_000, Math.max(100, Math.ceil(Number(match[1]) * 1_000) + 250));
+}
+
 export function normalizeStepJudgements(value, {
   parentId,
   siblingIds = [],
@@ -247,7 +259,7 @@ export async function requestGroqStepEvaluation({
     reasoning_format: "hidden",
     temperature: 0.2,
     top_p: 0.8,
-    max_completion_tokens: 1_200,
+    max_completion_tokens: 800,
     stream: false,
   });
 
@@ -257,16 +269,22 @@ export async function requestGroqStepEvaluation({
   let response;
   let payload;
   try {
-    response = await fetchImpl(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey.trim()}`,
-        "Content-Type": "application/json",
-      },
-      body: requestBody,
-      signal: controller.signal,
-    });
-    payload = await response.json().catch(() => null);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      response = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey.trim()}`,
+          "Content-Type": "application/json",
+        },
+        body: requestBody,
+        signal: controller.signal,
+      });
+      payload = await response.json().catch(() => null);
+      if (response.ok) break;
+      const delayMs = groqRetryDelayMs(response, payload);
+      if (delayMs == null || attempt === 2) break;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
   } catch (error) {
     if (error?.name === "AbortError") throw new Error("Groqの一手評価がタイムアウトしました");
     throw new Error("Groq APIへ接続できませんでした");
@@ -274,7 +292,7 @@ export async function requestGroqStepEvaluation({
     clearTimeout(timeout);
   }
 
-  if (!response.ok) {
+  if (!response?.ok) {
     const message = typeof payload?.error?.message === "string" ? payload.error.message : "";
     throw new Error(message ? `Groq API: ${message}` : `Groq APIがHTTP ${response.status}を返しました`);
   }

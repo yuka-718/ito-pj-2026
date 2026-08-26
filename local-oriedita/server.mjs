@@ -972,7 +972,7 @@ function evaluationImagePath(imagePath) {
   const resizedPath = imagePath.replace(/(\.[^.]+)$/i, "-evaluation$1");
   if (resizedPath === imagePath) return imagePath;
   try {
-    execFileSync("/usr/bin/sips", ["-Z", "512", imagePath, "--out", resizedPath], {
+    execFileSync("/usr/bin/sips", ["-Z", "384", imagePath, "--out", resizedPath], {
       stdio: ["ignore", "ignore", "ignore"],
     });
     return resizedPath;
