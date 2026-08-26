@@ -144,10 +144,20 @@ export default function Home() {
   const [message, setMessage] = useState("");
   const [runState, setRunState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [orieditaResult, setOrieditaResult] = useState<OrieditaResult | null>(null);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   useEffect(() => () => {
     if (image?.url) URL.revokeObjectURL(image.url);
   }, [image]);
+
+  useEffect(() => {
+    if (runState !== "running" || startedAt == null) return;
+    const updateElapsed = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    updateElapsed();
+    const timer = window.setInterval(updateElapsed, 250);
+    return () => window.clearInterval(timer);
+  }, [runState, startedAt]);
 
   function handleImage(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -184,6 +194,9 @@ export default function Home() {
     setModelKey(analysis.presetKey);
     setOrieditaResult(null);
     setRunState("running");
+    const runStartedAt = Date.now();
+    setStartedAt(runStartedAt);
+    setElapsedSeconds(0);
     setMessage("生成→評価→再生成を開始します");
 
     try {
@@ -212,11 +225,15 @@ export default function Home() {
       });
       setOrieditaResult(result);
       if (result.knowledgeMatch) setModelKey(result.knowledgeMatch.family);
+      setElapsedSeconds(Math.max(1, Math.floor((Date.now() - runStartedAt) / 1000)));
+      setStartedAt(null);
       setRunState("done");
       setMessage(result.knowledgeMatch
         ? `知識ベースから「${result.knowledgeMatch.title}」を表示しました`
         : `${result.evaluation.iterations}サイクル完了。最良評価${result.evaluation.score}点`);
     } catch (error) {
+      setElapsedSeconds(Math.max(1, Math.floor((Date.now() - runStartedAt) / 1000)));
+      setStartedAt(null);
       setRunState("error");
       setMessage(error instanceof Error ? error.message : "処理サーバーへ接続できませんでした");
     }
@@ -272,7 +289,7 @@ export default function Home() {
 
         <button className="generate" type="submit" disabled={runState === "running"}>
           {runState === "running" ? "生成・評価中…" : runState === "error" ? "再接続して生成" : "生成する"}
-          <span>{runState === "running" ? "···" : "→"}</span>
+          <span>{runState === "idle" ? "→" : `${elapsedSeconds}秒`}</span>
         </button>
         <p className="srOnly" role="status" aria-live="polite">{message}</p>
       </form>
