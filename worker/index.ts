@@ -36,6 +36,9 @@ const worker = {
       const upstream = await resolveOrieditaUpstream(
         env.ORIEDITA_DISCOVERY_URL,
         env.ORIEDITA_UPSTREAM_URL,
+        fetch,
+        Date.now(),
+        request.method === "POST",
       );
       return proxyOrieditaRequest(request, upstream);
     }

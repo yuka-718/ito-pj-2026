@@ -41,7 +41,8 @@ function xml(value) {
 
 const cloudflared = commandPath("cloudflared", "/opt/homebrew/bin/cloudflared");
 const gh = commandPath("gh", "/opt/homebrew/bin/gh");
-const pathValue = [dirname(process.execPath), dirname(cloudflared), dirname(gh), "/usr/bin", "/bin"].join(":");
+const ssh = commandPath("ssh", "/usr/bin/ssh");
+const pathValue = [dirname(process.execPath), dirname(cloudflared), dirname(gh), dirname(ssh), "/usr/bin", "/bin"].join(":");
 await Promise.all([mkdir(launchAgents, { recursive: true }), mkdir(logs, { recursive: true })]);
 
 const plist = `<?xml version="1.0" encoding="UTF-8"?>
@@ -58,6 +59,8 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <key>PATH</key><string>${xml(pathValue)}</string>
     <key>ORI_AI_CLOUDFLARED</key><string>${xml(cloudflared)}</string>
     <key>ORI_AI_GH</key><string>${xml(gh)}</string>
+    <key>ORI_AI_SSH</key><string>${xml(ssh)}</string>
+    <key>ORI_AI_TUNNEL_PROVIDER</key><string>localhost-run</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -71,6 +74,17 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
 launchctl("bootout", service);
 await writeFile(plistPath, plist, { mode: 0o600 });
 execFileSync("plutil", ["-lint", plistPath], { stdio: "inherit" });
-launchctl("bootstrap", domain, plistPath);
+let bootstrapped = false;
+for (let attempt = 0; attempt < 10; attempt += 1) {
+  try {
+    launchctl("bootstrap", domain, plistPath);
+    bootstrapped = true;
+    break;
+  } catch (error) {
+    if (attempt === 9) throw error;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 500));
+  }
+}
+if (!bootstrapped) throw new Error("ORIAI tunnel service could not be started");
 launchctl("kickstart", "-k", service);
 process.stdout.write(`ORIAI tunnel service installed: ${plistPath}\n`);

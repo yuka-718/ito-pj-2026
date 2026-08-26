@@ -49,11 +49,12 @@ export async function resolveOrieditaUpstream(
   fallbackValue: string | undefined,
   fetcher: FetchLike = fetch,
   now = Date.now(),
+  force = false,
 ) {
   const fallback = validHttpsOrigin(fallbackValue);
   const discovery = validHttpsOrigin(discoveryValue);
   if (!discovery) return fallback ?? undefined;
-  if (discoveryCache?.source === discovery && discoveryCache.expiresAt > now) {
+  if (!force && discoveryCache?.source === discovery && discoveryCache.expiresAt > now) {
     return discoveryCache.upstream;
   }
 
@@ -61,14 +62,18 @@ export async function resolveOrieditaUpstream(
     const registryUrl = new URL(discoveryValue!);
     registryUrl.searchParams.set("refresh", String(Math.floor(now / 10_000)));
     const response = await fetcher(new Request(registryUrl, {
-      headers: { Accept: "application/json" },
+      headers: {
+        Accept: "application/vnd.github.raw+json, application/json",
+        "Cache-Control": "no-cache",
+        "X-GitHub-Api-Version": "2022-11-28",
+      },
       cache: "no-store",
     }));
     if (!response.ok) throw new Error("discovery unavailable");
     const payload = await response.json() as { url?: unknown };
     const upstream = validHttpsOrigin(payload.url);
     if (!upstream) throw new Error("invalid discovery response");
-    discoveryCache = { source: discovery, upstream, expiresAt: now + 10_000 };
+    discoveryCache = { source: discovery, upstream, expiresAt: now + 60_000 };
     return upstream;
   } catch {
     return fallback ?? undefined;

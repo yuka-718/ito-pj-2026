@@ -10,5 +10,9 @@ test("extracts the latest quick tunnel URL from cloudflared output", () => {
   https://current-tunnel.trycloudflare.com
   `;
   assert.equal(latestTunnelUrl(output), "https://current-tunnel.trycloudflare.com");
+  assert.equal(
+    latestTunnelUrl("abc123.lhr.life tunneled with tls termination, https://abc123.lhr.life"),
+    "https://abc123.lhr.life",
+  );
   assert.equal(latestTunnelUrl("no tunnel yet"), null);
 });

@@ -3,12 +3,14 @@
 import { execFileSync, spawn } from "node:child_process";
 
 const cloudflared = process.env.ORI_AI_CLOUDFLARED ?? "/opt/homebrew/bin/cloudflared";
+const ssh = process.env.ORI_AI_SSH ?? "/usr/bin/ssh";
+const provider = process.env.ORI_AI_TUNNEL_PROVIDER ?? "localhost-run";
 const gh = process.env.ORI_AI_GH ?? "/opt/homebrew/bin/gh";
 const registryRepo = process.env.ORI_AI_TUNNEL_REGISTRY_REPO ?? "yuka-718/oriai";
 const registryBranch = process.env.ORI_AI_TUNNEL_REGISTRY_BRANCH ?? "runtime";
 const registryPath = process.env.ORI_AI_TUNNEL_REGISTRY_PATH ?? "oriedita-upstream.json";
 const localHealth = process.env.ORI_AI_LOCAL_HEALTH ?? "http://127.0.0.1:8788/health";
-const tunnelUrlPattern = /https:\/\/[a-z0-9-]+\.trycloudflare\.com/gi;
+const tunnelUrlPattern = /https:\/\/(?:[a-z0-9-]+\.trycloudflare\.com|[a-z0-9-]+\.lhr\.life)/gi;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -58,26 +60,40 @@ async function healthy(url, timeoutMs = 10_000) {
 }
 
 function startTunnel() {
-  const child = spawn(cloudflared, [
-    "tunnel",
-    "--no-autoupdate",
-    "--protocol",
-    "http2",
-    "--url",
-    localHealth.replace(/\/health$/, ""),
-  ], { stdio: ["ignore", "ignore", "pipe"] });
+  const command = provider === "cloudflare" ? cloudflared : ssh;
+  const argumentsList = provider === "cloudflare" ? [
+    "tunnel", "--no-autoupdate", "--protocol", "http2", "--url", localHealth.replace(/\/health$/, ""),
+  ] : [
+    "-T",
+    "-o", "BatchMode=yes",
+    "-o", "StrictHostKeyChecking=accept-new",
+    "-o", "ServerAliveInterval=30",
+    "-o", "ServerAliveCountMax=3",
+    "-o", "ExitOnForwardFailure=yes",
+    "-R", "80:127.0.0.1:8788",
+    "nokey@localhost.run",
+  ];
+  const child = spawn(command, argumentsList, { stdio: ["ignore", "pipe", "pipe"] });
   let buffer = "";
   let settled = false;
   const url = new Promise((resolve, reject) => {
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      process.stderr.write(chunk);
+    const inspectChunk = (chunk) => {
       buffer = `${buffer}${chunk}`.slice(-16_000);
       const found = latestTunnelUrl(buffer);
       if (found && !settled) {
         settled = true;
         resolve(found);
       }
+    };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      process.stdout.write(chunk);
+      inspectChunk(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      process.stderr.write(chunk);
+      inspectChunk(chunk);
     });
     child.once("error", (error) => {
       if (!settled) {
