@@ -67,7 +67,6 @@ export async function resolveOrieditaUpstream(
         "Cache-Control": "no-cache",
         "X-GitHub-Api-Version": "2022-11-28",
       },
-      cache: "no-store",
     }));
     if (!response.ok) throw new Error("discovery unavailable");
     const payload = await response.json() as { url?: unknown };
