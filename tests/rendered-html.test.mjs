@@ -47,7 +47,7 @@ test("contains the social assets, static output, and no starter preview", async 
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
 
-test("allows repeated test runs and makes submission errors visible", async () => {
+test("allows unlimited validation runs and makes submission errors visible", async () => {
   const [page, server, envExample, oracleDeploy] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../local-oriedita/server.mjs", import.meta.url), "utf8"),
@@ -57,7 +57,8 @@ test("allows repeated test runs and makes submission errors visible", async () =
 
   assert.match(page, /runState === "error" \? message : "つくりたい折り紙を入力"/);
   assert.match(page, /runState === "error" \? "もう一度生成"/);
-  assert.match(server, /ORI_AI_MAX_JOBS_PER_WINDOW \?\? "30"/);
-  assert.match(envExample, /^ORI_AI_MAX_JOBS_PER_WINDOW=30$/m);
-  assert.match(oracleDeploy, /ORI_AI_MAX_JOBS_PER_WINDOW=30/);
+  assert.match(server, /ORI_AI_MAX_JOBS_PER_WINDOW \?\? "0"/);
+  assert.match(server, /if \(maxJobsPerWindow === 0\) return;/);
+  assert.match(envExample, /^ORI_AI_MAX_JOBS_PER_WINDOW=0$/m);
+  assert.match(oracleDeploy, /ORI_AI_MAX_JOBS_PER_WINDOW=0/);
 });
