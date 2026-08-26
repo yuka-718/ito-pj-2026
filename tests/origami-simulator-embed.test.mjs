@@ -49,7 +49,8 @@ test("application hides both result panels until the completed job is available"
   ]);
 
   assert.doesNotMatch(page, /setCandidate|function CreasePattern/);
-  assert.match(page, /\{runState === "done" && orieditaResult && \(\s*<section className="outputs"/);
+  assert.match(page, /\{orieditaResult && \(\s*<section className="outputs"/);
+  assert.doesNotMatch(page, /runState === "done" && orieditaResult/);
   assert.match(page, /src=\{orieditaResult\.creaseImage\}/);
   assert.match(page, /<OrigamiSimulator3D foldFile=\{orieditaResult\.foldFile\}/);
   assert.doesNotMatch(component, /Origami3D/);

@@ -271,7 +271,7 @@ export default function Home() {
         <p className="srOnly" role="status" aria-live="polite">{message}</p>
       </form>
 
-      {runState === "done" && orieditaResult && (
+      {orieditaResult && (
         <section className="outputs" aria-label="生成結果">
           <article className="outputPanel">
             <div className="outputTitle">
