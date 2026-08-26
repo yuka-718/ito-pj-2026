@@ -8,7 +8,6 @@ import {
   candidateToFold,
   generateCandidates,
   hashString,
-  type Candidate,
 } from "./origami-engine";
 
 const initialPrompt = "";
@@ -118,42 +117,9 @@ async function waitForJob(id: string, onProgress?: (job: LocalJob) => void) {
   throw new Error("Oriedita処理がタイムアウトしました");
 }
 
-function CreasePattern({ candidate }: { candidate: Candidate }) {
-  return (
-    <svg className="creasePattern" viewBox="0 0 600 600" role="img" aria-label="生成された折り紙の展開図">
-      <defs>
-        <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
-          <path d="M30 0H0V30" fill="none" stroke="rgba(19,34,60,.07)" strokeWidth="1" />
-        </pattern>
-      </defs>
-      <rect width="600" height="600" className="paper" />
-      <rect width="600" height="600" fill="url(#grid)" />
-      {candidate.edges.map((edge, index) => {
-        const [from, to] = edge.vertices;
-        const [x1, y1] = candidate.vertices[from];
-        const [x2, y2] = candidate.vertices[to];
-        return (
-          <line
-            key={`${from}-${to}-${index}`}
-            x1={x1}
-            y1={y1}
-            x2={x2}
-            y2={y2}
-            className={`foldLine fold${edge.assignment}`}
-            vectorEffect="non-scaling-stroke"
-          />
-        );
-      })}
-      <circle cx="300" cy="300" r="6" className="foldCenter" />
-    </svg>
-  );
-}
-
 export default function Home() {
   const [prompt, setPrompt] = useState(initialPrompt);
   const [image, setImage] = useState<UploadedImage | null>(null);
-  const [candidate, setCandidate] = useState<Candidate | null>(null);
-  const [modelKey, setModelKey] = useState("custom");
   const [message, setMessage] = useState("");
   const [runState, setRunState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [orieditaResult, setOrieditaResult] = useState<OrieditaResult | null>(null);
@@ -199,12 +165,9 @@ export default function Home() {
       symmetry: true,
       seed,
     });
-    const next = generated[0];
     const folds = generated.map((item) =>
       JSON.parse(candidateToFold(item, prompt || image?.name || "折り紙")),
     );
-    setCandidate(next);
-    setModelKey(analysis.presetKey);
     setOrieditaResult(null);
     setRunState("running");
     const runStartedAt = Date.now();
@@ -239,7 +202,6 @@ export default function Home() {
         }
       });
       setOrieditaResult(result);
-      if (result.knowledgeMatch) setModelKey(result.knowledgeMatch.family);
       setElapsedSeconds(Math.max(1, Math.floor((Date.now() - runStartedAt) / 1000)));
       setStartedAt(null);
       setRunState("done");
@@ -320,20 +282,20 @@ export default function Home() {
               // Oriedita returns a local data URL after the completed run.
               // eslint-disable-next-line @next/next/no-img-element
               <img className="orieditaCrease" src={orieditaResult.creaseImage} alt="Orieditaで検証した展開図" />
-            ) : candidate ? <CreasePattern candidate={candidate} /> : null}
+            ) : null}
           </div>
         </article>
 
         <article className="outputPanel">
           <div className="modelTitle">
             <h1>完成形 3D</h1>
-            {(orieditaResult || candidate) && <span>{orieditaResult?.knowledgeMatch
+            {orieditaResult && <span>{orieditaResult.knowledgeMatch
               ? orieditaResult.knowledgeMatch.title
-              : orieditaResult ? `ORIEDITA SCORE ${orieditaResult.evaluation.score}` : "ドラッグで回転"}</span>}
+              : `ORIEDITA SCORE ${orieditaResult.evaluation.score}`}</span>}
           </div>
           <div className="modelStage">
-            {(orieditaResult || candidate) && (
-              <OrigamiSimulator3D foldFile={orieditaResult?.foldFile ?? null} modelKey={modelKey} />
+            {orieditaResult && (
+              <OrigamiSimulator3D foldFile={orieditaResult.foldFile} />
             )}
             {orieditaResult && (
               <figure className={`foldedEvidence ${orieditaResult.knowledgeMatch ? "knowledgeEvidence" : ""}`}>

@@ -42,6 +42,21 @@ test("application uses a deployment-relative simulator URL and strict replies", 
   assert.doesNotMatch(component, /https:\/\/origamisimulator\.org/);
 });
 
+test("application keeps both result panels empty until the completed job is available", async () => {
+  const [page, component] = await Promise.all([
+    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../app/OrigamiSimulator3D.tsx", import.meta.url), "utf8"),
+  ]);
+
+  assert.doesNotMatch(page, /setCandidate|function CreasePattern/);
+  assert.match(page, /orieditaResult\.creaseImage/);
+  assert.match(page, /\{orieditaResult \? \([\s\S]*src=\{orieditaResult\.creaseImage\}[\s\S]*\) : null\}/);
+  assert.match(page, /orieditaResult && \(\s*<OrigamiSimulator3D foldFile=\{orieditaResult\.foldFile\}/);
+  assert.doesNotMatch(component, /Origami3D/);
+  assert.match(component, /if \(!fold \|\| failed\) return null;/);
+  assert.doesNotMatch(component, /!loaded &&/);
+});
+
 test("embed removes analytics and exposes only the WebGL canvas", async () => {
   const [html, css] = await Promise.all([
     readFile(new URL("index.html", simulatorRoot), "utf8"),

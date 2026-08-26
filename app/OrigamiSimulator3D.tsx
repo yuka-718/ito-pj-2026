@@ -2,8 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import Origami3D from "./Origami3D";
-
 const SIMULATOR_URL = "./origami-simulator/index.html";
 const BOOT_TIMEOUT_MS = 15_000;
 const IMPORT_TIMEOUT_MS = 20_000;
@@ -47,10 +45,8 @@ function decodeFold(dataUrl: string | null) {
 
 export default function OrigamiSimulator3D({
   foldFile,
-  modelKey,
 }: {
   foldFile: string | null;
-  modelKey: string;
 }) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const fold = useMemo(() => decodeFold(foldFile), [foldFile]);
@@ -155,11 +151,10 @@ export default function OrigamiSimulator3D({
 
   useEffect(() => clearTimeout, [clearTimeout]);
 
-  if (!fold || failed) return <Origami3D modelKey={modelKey} />;
+  if (!fold || failed) return null;
 
   return (
     <div className={`simulatorViewport ${loaded ? "isReady" : ""}`} data-simulator-ready={ready || undefined}>
-      {!loaded && <Origami3D modelKey={modelKey} />}
       <iframe
         ref={iframeRef}
         className="origamiSimulatorFrame"
