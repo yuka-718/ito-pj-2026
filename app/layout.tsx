@@ -10,11 +10,6 @@ export const metadata: Metadata = {
     "プロンプトと参考画像から、折り紙の展開図と完成形3Dモデルを表示する研究プロトタイプ。",
   authors: [{ name: "伊藤夕夏" }],
   alternates: { canonical: publicUrl },
-  icons: {
-    icon: [{ url: "favicon.png", type: "image/png" }],
-    shortcut: "favicon.png",
-    apple: "favicon.png",
-  },
   openGraph: {
     type: "website",
     locale: "ja_JP",
