@@ -38,6 +38,10 @@ type Evaluation = {
   physical?: { score: number; orieditaCompleted: boolean };
   appearance?: { score: number; rotationNormalized: boolean; dimensions: string };
   foldability?: { score: number; layerCount: string; clearanceIsProxy: boolean };
+  maxCycles?: number;
+  targetScore?: number;
+  bestCycle?: number;
+  cycles?: Array<{ cycle: number; status: string; score: number; issues: string[] }>;
 };
 
 type OrieditaResult = {
@@ -63,6 +67,7 @@ type LocalJob = {
   message: string;
   result: OrieditaResult | null;
   error: string | null;
+  progress?: { cycle: number; maxCycles: number; bestScore: number | null } | null;
 };
 
 const configuredApiServer = process.env.NEXT_PUBLIC_ORI_AI_API_URL?.trim();
@@ -87,12 +92,13 @@ function fileToDataUrl(file: File) {
   });
 }
 
-async function waitForJob(id: string) {
+async function waitForJob(id: string, onProgress?: (job: LocalJob) => void) {
   for (let attempt = 0; attempt < 360; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, attempt < 4 ? 1200 : 2500));
     const response = await apiFetch(`/jobs/${id}`);
     const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
     if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理状況を取得できませんでした");
+    onProgress?.(payload.job);
     if (payload.job.status === "done" && payload.job.result) return payload.job.result;
     if (payload.job.status === "failed") throw new Error(payload.job.error ?? "Oriedita処理に失敗しました");
   }
@@ -178,7 +184,7 @@ export default function Home() {
     setModelKey(analysis.presetKey);
     setOrieditaResult(null);
     setRunState("running");
-    setMessage("CodexがOrieditaを操作しています");
+    setMessage("生成→評価→再生成を開始します");
 
     try {
       const response = await apiFetch("/jobs", {
@@ -198,13 +204,18 @@ export default function Home() {
       });
       const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
       if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理サーバーへ接続できませんでした");
-      const result = await waitForJob(payload.job.id);
+      const result = await waitForJob(payload.job.id, (job) => {
+        if (job.progress?.cycle) {
+          const best = job.progress.bestScore == null ? "" : `・現在の最高${job.progress.bestScore}点`;
+          setMessage(`生成→評価→再生成 ${job.progress.cycle}/${job.progress.maxCycles}${best}`);
+        }
+      });
       setOrieditaResult(result);
       if (result.knowledgeMatch) setModelKey(result.knowledgeMatch.family);
       setRunState("done");
       setMessage(result.knowledgeMatch
         ? `知識ベースから「${result.knowledgeMatch.title}」を表示しました`
-        : `${result.evaluation.iterations}段階の検証を完了しました。評価${result.evaluation.score}点`);
+        : `${result.evaluation.iterations}サイクル完了。最良評価${result.evaluation.score}点`);
     } catch (error) {
       setRunState("error");
       setMessage(error instanceof Error ? error.message : "処理サーバーへ接続できませんでした");
@@ -260,7 +271,7 @@ export default function Home() {
         </div>
 
         <button className="generate" type="submit" disabled={runState === "running"}>
-          {runState === "running" ? "Orieditaで処理中…" : runState === "error" ? "再接続して生成" : "生成する"}
+          {runState === "running" ? "生成・評価中…" : runState === "error" ? "再接続して生成" : "生成する"}
           <span>{runState === "running" ? "···" : "→"}</span>
         </button>
         <p className="srOnly" role="status" aria-live="polite">{message}</p>

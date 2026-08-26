@@ -3,7 +3,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { createWriteStream } from "node:fs";
-import { access, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { access, copyFile, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -21,6 +21,7 @@ import {
   validateCandidatePool,
 } from "./fast-evaluation.mjs";
 import { createMountainValleyVariants } from "./fold-repair.mjs";
+import { foldGeometrySignature, regenerateCandidatePool } from "./regeneration.mjs";
 import {
   ApiInputError,
   createOpenApiDocument,
@@ -37,6 +38,8 @@ const knowledgePack = await loadKnowledgePack();
 const port = Number.parseInt(process.env.ORI_AI_LOCAL_PORT ?? "8788", 10);
 const host = process.env.ORI_AI_LOCAL_HOST ?? "127.0.0.1";
 const maxIterations = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_ITERATIONS ?? "10", 10)));
+const maxCycles = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_CYCLES ?? String(maxIterations), 10)));
+const targetScore = Math.min(100, Math.max(1, Number.parseInt(process.env.ORI_AI_TARGET_SCORE ?? "85", 10)));
 const jobTimeoutMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_JOB_TIMEOUT_MS ?? "1200000", 10));
 const rateWindowMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_RATE_WINDOW_MS ?? "21600000", 10));
 const maxJobsPerWindow = Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_JOBS_PER_WINDOW ?? "3", 10));
@@ -165,6 +168,11 @@ function publicJob(job) {
     completedAt: job.completedAt,
     result: job.result,
     error: job.error,
+    progress: job.type === "design" ? {
+      cycle: job.cycle ?? 0,
+      maxCycles: job.maxCycles ?? maxCycles,
+      bestScore: job.bestScore ?? null,
+    } : null,
   };
 }
 
@@ -228,6 +236,7 @@ async function createJob(input) {
   const initialFold = candidateFolds[preflight.selectedIndex];
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await mkdir(join(directory, "iterations"), { recursive: true, mode: 0o700 });
+  await mkdir(join(directory, "cycles"), { recursive: true, mode: 0o700 });
   await writeFile(join(directory, "input.fold"), `${JSON.stringify(initialFold, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(directory, "brief.txt"), `${input.prompt || "参考画像をもとに設計"}\n`, { mode: 0o600 });
   await writeFile(join(directory, "goal.json"), `${JSON.stringify(goal, null, 2)}\n`, { mode: 0o600 });
@@ -271,6 +280,9 @@ async function createJob(input) {
     candidateFolds,
     knowledgeMatch,
     knowledgeReferences,
+    cycle: 0,
+    maxCycles: knowledgeMatch ? 1 : maxCycles,
+    bestScore: null,
     status: "queued",
     message: "処理待ち",
     createdAt: new Date().toISOString(),
@@ -314,7 +326,7 @@ async function createOrieditaFoldJob(input) {
 function workerPrompt(job) {
   if (job.knowledgeMatch) {
     const match = publicKnowledgeMatch(job.knowledgeMatch);
-    return `あなたは伊藤PJの最終評価担当です。検索済みの登録構造を変更せず、Orieditaで平坦折り計算を1回だけ確認してください。
+    return `あなたは伊藤PJの評価担当です。検索済みの登録構造を変更せず、Orieditaで平坦折り計算を1回だけ確認してください。
 
 検索結果:
 - title: ${match.title}
@@ -329,7 +341,7 @@ function workerPrompt(job) {
 4. get_folded_figure確認後はinput.foldを開いた状態のままにし、foldActionをもう一度実行しない。
 5. 見た目は0°・90°・180°・270°の回転を同一として評価する。
 6. この知識パックは合成構造であり、完成作品や3Dモデルだとは判定しない。
-7. JSONのiterationsは1、stop_reasonはfinal_knowledge_validationとする。
+7. JSONのiterationsは1、stop_reasonはexact_knowledge_validationとする。
 
 制約:
 - 作業ディレクトリ以外のファイルは変更しない。
@@ -337,7 +349,7 @@ function workerPrompt(job) {
 - 実際に折れない案を折れると断定しない。
 - 最終回答は指定されたJSONスキーマだけを返す。`;
   }
-  return `あなたは伊藤PJの折り紙最終評価担当です。高速な9項目の決定論チェックとPareto選択は完了済みです。CodexからOriedita MCPを操作し、選択案を1回だけ最終確認してください。
+  return `あなたは伊藤PJの折り紙評価担当です。これは生成→評価→再生成ループの第${job.cycle}サイクル目です。高速な9項目の決定論チェックとPareto選択は完了済みです。CodexからOriedita MCPを操作し、このサイクルの選択案を評価してください。
 
 作業ディレクトリ内の入力:
 - brief.txt: 作りたい折り紙
@@ -350,16 +362,17 @@ ${job.referencePath ? `- ${job.referencePath.split("/").at(-1)}: 参考画像` :
 必ず行うこと:
 1. Orieditaのget_statusを呼び、open_fileで input.fold を開く。
 2. foldActionを実行し、get_folded_figureで折り上がりを確認する。
-3. input.foldは変更しない。物理条件の結果はcandidate-evaluation.jsonを尊重し、見た目だけを最終採点する。
+3. input.foldは変更しない。物理条件の結果はcandidate-evaluation.jsonを尊重し、見た目を採点する。
 4. goal.jsonの部位が折り上がりの輪郭で識別できるかを評価する。0°・90°・180°・270°の回転は同一として扱う。
 5. 参考画像がある場合は輪郭と部位配置を比較する。reference-*.foldを完成形の正解として扱わない。
 6. get_folded_figure確認後はinput.foldを開いた状態のままにし、foldActionをもう一度実行しない。
-7. JSONのiterationsは1、stop_reasonはfinal_oriedita_visual_judgeとする。これは全10段階中の最後の1回である。
+7. 次の再生成で直せるよう、issuesには不足している部位名、向き、太さ、対称性を具体的に書く。
+8. JSONのiterationsは1、stop_reasonはcycle_visual_judgeとする。
 
 制約:
 - 一枚の正方形、切断なし、接着なしを守る。
 - 作業ディレクトリ以外のファイルは変更しない。
-- サブエージェントは使わず、この1セッションだけで完了する。
+- サブエージェントは使わず、この評価セッションだけで完了する。
 - 実際に折れない案を折れると断定しない。
 - Orieditaの平坦折り画像を立体完成形や折り順の証明だと断定しない。
 - 最終回答は指定されたJSONスキーマだけを返す。`;
@@ -659,6 +672,187 @@ async function collectResult(job, evaluationPath) {
   };
 }
 
+async function copyIfPresent(source, destination) {
+  try {
+    await copyFile(source, destination);
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+async function prepareDesignCycle(job, candidateFolds, cycle) {
+  const directory = join(job.directory, "cycles", String(cycle).padStart(2, "0"));
+  const preflight = validateCandidatePool(candidateFolds, job.goal);
+  const initialFold = candidateFolds[preflight.selectedIndex];
+  await mkdir(join(directory, "iterations"), { recursive: true, mode: 0o700 });
+  await Promise.all([
+    writeFile(join(directory, "brief.txt"), `${job.prompt || "参考画像をもとに設計"}\n`, { mode: 0o600 }),
+    writeFile(join(directory, "goal.json"), `${JSON.stringify(job.goal, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(directory, "input.fold"), `${JSON.stringify(initialFold, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(directory, "candidate-evaluation.json"), `${JSON.stringify(preflight, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(directory, "knowledge-references.json"), `${JSON.stringify(job.knowledgeReferences, null, 2)}\n`, { mode: 0o600 }),
+    ...candidateFolds.map((candidate, index) => writeFile(
+      join(directory, `candidate-${String(index + 1).padStart(2, "0")}.fold`),
+      `${JSON.stringify(candidate, null, 2)}\n`,
+      { mode: 0o600 },
+    )),
+    ...preflight.validations.map((validation) => writeFile(
+      join(directory, "iterations", `${String(validation.index).padStart(2, "0")}-${validation.name}.json`),
+      `${JSON.stringify(validation, null, 2)}\n`,
+      { mode: 0o600 },
+    )),
+  ]);
+  await writeFile(join(directory, "iterations.json"), `${JSON.stringify(preflight.validations, null, 2)}\n`, { mode: 0o600 });
+  await Promise.all([1, 2, 3].map((index) => copyIfPresent(
+    join(job.directory, `reference-${String(index).padStart(2, "0")}.fold`),
+    join(directory, `reference-${String(index).padStart(2, "0")}.fold`),
+  )));
+  return {
+    ...job,
+    directory,
+    cycle,
+    preflight,
+    candidateFolds,
+    assignmentRepair: null,
+  };
+}
+
+function rankRegeneratedCandidates(candidates, goal, limit = 3) {
+  return candidates.map((fold) => {
+    const evaluation = validateCandidatePool([fold], goal);
+    const candidate = evaluation.candidates[0];
+    return { fold, evaluation, hardFailures: candidate.hardFailures, scores: evaluation.selectedScores };
+  }).sort((a, b) =>
+    a.hardFailures - b.hardFailures
+    || b.scores.physical - a.scores.physical
+    || b.scores.appearance - a.scores.appearance
+    || b.scores.foldability - a.scores.foldability
+    || foldGeometrySignature(a.fold).localeCompare(foldGeometrySignature(b.fold))
+  ).slice(0, limit).map(({ fold }) => fold);
+}
+
+function publicCycleRecord(record) {
+  return {
+    cycle: record.cycle,
+    status: record.status,
+    score: record.evaluation?.score ?? 0,
+    physical: record.evaluation?.physical?.score ?? 0,
+    appearance: record.evaluation?.appearance?.score ?? 0,
+    foldability: record.evaluation?.foldability?.score ?? 0,
+    selectedCandidate: record.evaluation?.selectedCandidate ?? record.preflight?.selectedCandidateId ?? null,
+    issues: record.evaluation?.issues ?? record.issues ?? [],
+    feedbackUsed: record.feedbackUsed,
+  };
+}
+
+function bestCycleRecord(records) {
+  return [...records].filter((record) => record.result).sort((a, b) =>
+    b.evaluation.score - a.evaluation.score
+    || b.evaluation.appearance.score - a.evaluation.appearance.score
+    || b.evaluation.physical.score - a.evaluation.physical.score
+    || a.cycle - b.cycle
+  )[0] ?? null;
+}
+
+async function runDesignLoop(job) {
+  let candidateFolds = job.candidateFolds;
+  let feedback = [];
+  let stopReason = "max_cycles_reached";
+  const records = [];
+
+  for (let cycle = 1; cycle <= job.maxCycles; cycle += 1) {
+    job.cycle = cycle;
+    job.message = `生成・評価サイクル ${cycle}/${job.maxCycles}`;
+    const cycleJob = await prepareDesignCycle(job, candidateFolds, cycle);
+    let record;
+    try {
+      await selectOrieditaFoldableAssignment(cycleJob);
+      const evaluationPath = await runCodex(cycleJob);
+      const result = await collectResult(cycleJob, evaluationPath);
+      record = {
+        cycle,
+        status: "completed",
+        feedbackUsed: feedback,
+        preflight: cycleJob.preflight,
+        evaluation: result.evaluation,
+        result,
+      };
+      records.push(record);
+      const best = bestCycleRecord(records);
+      job.bestScore = best?.evaluation.score ?? null;
+      await writeFile(
+        join(cycleJob.directory, "cycle-summary.json"),
+        `${JSON.stringify(publicCycleRecord(record), null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      if (job.knowledgeMatch) {
+        stopReason = "exact_knowledge_match";
+        break;
+      }
+      if (result.evaluation.score >= targetScore) {
+        stopReason = "target_score_reached";
+        break;
+      }
+      feedback = result.evaluation.issues;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      record = {
+        cycle,
+        status: "failed",
+        feedbackUsed: feedback,
+        preflight: cycleJob.preflight,
+        evaluation: null,
+        result: null,
+        issues: [message],
+      };
+      records.push(record);
+      feedback = [message];
+      await writeFile(
+        join(cycleJob.directory, "cycle-summary.json"),
+        `${JSON.stringify(publicCycleRecord(record), null, 2)}\n`,
+        { mode: 0o600 },
+      );
+      if (cycle === job.maxCycles && !bestCycleRecord(records)) throw error;
+    }
+
+    if (cycle === job.maxCycles) break;
+    const currentFold = JSON.parse(await readFile(join(cycleJob.directory, "input.fold"), "utf8"));
+    const regenerated = regenerateCandidatePool({
+      currentFold,
+      goal: job.goal,
+      feedback,
+      cycle: cycle + 1,
+      count: 24,
+    });
+    candidateFolds = rankRegeneratedCandidates(regenerated, job.goal, 3);
+    if (!candidateFolds.length) {
+      stopReason = "regeneration_exhausted";
+      break;
+    }
+  }
+
+  const best = bestCycleRecord(records);
+  if (!best) throw new Error("生成・評価ループで有効な候補を作成できませんでした");
+  const cycles = records.map(publicCycleRecord);
+  const evaluation = {
+    ...best.evaluation,
+    iterations: records.length,
+    stop_reason: stopReason,
+    mode: "generation_evaluation_regeneration_loop",
+    maxCycles: job.maxCycles,
+    targetScore,
+    bestCycle: best.cycle,
+    cycles,
+  };
+  const result = { ...best.result, evaluation };
+  await writeFile(
+    join(job.directory, "generation-loop.json"),
+    `${JSON.stringify({ stopReason, targetScore, bestCycle: best.cycle, cycles }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  return result;
+}
+
 async function collectOrieditaFoldResult(job) {
   const inputPath = join(job.directory, "input.fold");
   await orieditaRequest("/open", {
@@ -721,12 +915,7 @@ async function executeJob(job) {
     if (job.type === "oriedita-fold") {
       job.result = await collectOrieditaFoldResult(job);
     } else {
-      job.message = "Orieditaで折れる山谷配置を探索中";
-      await selectOrieditaFoldableAssignment(job);
-      job.message = "Codexが最終評価中";
-      const evaluationPath = await runCodex(job);
-      job.message = "結果を書き出し中";
-      job.result = await collectResult(job, evaluationPath);
+      job.result = await runDesignLoop(job);
     }
     job.status = "done";
     job.message = "完了";
@@ -779,6 +968,8 @@ async function handle(request, response) {
         busy: Boolean(activeJobId),
         queued: queue.length,
         maxIterations,
+        maxCycles,
+        targetScore,
       },
     }, origin);
     return;
@@ -793,6 +984,8 @@ async function handle(request, response) {
         busy: Boolean(activeJobId),
         queued: queue.length,
         authentication: apiToken ? "bearer" : "none",
+        maxCycles,
+        targetScore,
         oriedita: await inspectOriedita(),
       },
     }, origin);
