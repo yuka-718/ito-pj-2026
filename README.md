@@ -91,7 +91,7 @@ GitHub Pagesへ公開します。
 npm run build:pages
 ```
 
-- Site: https://yuka-718.github.io/ito-pj-2026/
-- Repository: https://github.com/yuka-718/ito-pj-2026
+- Site: https://yuka-718.github.io/oriai/
+- Repository: https://github.com/yuka-718/oriai
 
 個人連絡先、会議URL、移動・健康など公開に不要な私的情報はサイトへ含めていません。

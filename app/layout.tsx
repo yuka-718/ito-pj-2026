@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
-const publicUrl = "https://yuka-718.github.io/ito-pj-2026/";
+const publicUrl = "https://yuka-718.github.io/oriai/";
 
 export const metadata: Metadata = {
   metadataBase: new URL(publicUrl),

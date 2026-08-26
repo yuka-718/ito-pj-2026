@@ -2,7 +2,7 @@ import { access, readFile, readdir, writeFile } from "node:fs/promises";
 import { extname, join, resolve } from "node:path";
 
 const outputRoot = resolve("dist/client");
-const basePath = "/ito-pj-2026";
+const basePath = "/oriai";
 const textExtensions = new Set([".html", ".rsc", ".js", ".css", ".json", ""]);
 const rootPaths = [
   "/_next/",
