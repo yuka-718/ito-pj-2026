@@ -24,8 +24,6 @@ const runtimeJar = join(applicationSupport, "oriedita.jar");
 const sourceRoot = process.env.ORIEDITA_SOURCE_ROOT ?? "/Users/yukaito/Documents/oriedita";
 const sourceMcp = join(sourceRoot, "oriedita-mcp");
 const sourceJar = join(sourceRoot, "oriedita", "target", "oriedita-1.1.4-SNAPSHOT.jar");
-const codexPath = process.env.ORI_AI_CODEX_BIN
-  ?? "/Applications/ChatGPT.app/Contents/Resources/codex";
 
 function launchctl(...args) {
   try {
@@ -60,7 +58,6 @@ await Promise.all([
 
 const pathValue = [
   dirname(process.execPath),
-  dirname(codexPath),
   "/opt/homebrew/bin",
   "/usr/local/bin",
   "/usr/bin",
@@ -86,8 +83,8 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <string>${xml(homedir())}</string>
     <key>PATH</key>
     <string>${xml(pathValue)}</string>
-    <key>ORI_AI_CODEX_BIN</key>
-    <string>${xml(codexPath)}</string>
+    <key>ORI_AI_GROQ_MODEL</key>
+    <string>qwen/qwen3.6-27b</string>
     <key>ORI_AI_MAX_ITERATIONS</key>
     <string>10</string>
     <key>ORI_AI_TRUST_PROXY</key>

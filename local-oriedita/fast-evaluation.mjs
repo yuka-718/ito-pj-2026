@@ -536,8 +536,8 @@ export function mergeFinalEvaluation(preflight, judge, { completed = true, issue
   const now = new Date().toISOString();
   const finalRecord = {
     index: 10,
-    kind: "oriedita_codex",
-    name: "oriedita_final_fold_and_visual_judge",
+    kind: "oriedita_groq",
+    name: "oriedita_final_fold_and_groq_visual_judge",
     category: "physical_and_appearance",
     startedAt: now,
     completedAt: now,
@@ -557,7 +557,7 @@ export function mergeFinalEvaluation(preflight, judge, { completed = true, issue
     stop_reason: "completed_10_validations",
     summary: typeof judge?.summary === "string" ? judge.summary : "10段階の検証を完了しました",
     issues: finalRecord.issues.slice(0, 8),
-    mode: "9_fast_checks_plus_1_oriedita_codex",
+    mode: "9_fast_checks_plus_1_oriedita_groq",
     physical: { score: Math.round(physical), orieditaCompleted: Boolean(completed) },
     appearance: { score: Math.round(appearance), rotationNormalized: true, dimensions: "2d_folded_figure" },
     foldability: { score: Math.round(foldability), layerCount: "unknown", clearanceIsProxy: true },

@@ -8,7 +8,7 @@
 - プロンプト入力
 - 参考画像アップロード
 - 3候補の物理・見た目・複雑さを分離したPareto選択
-- 3候補の生成、9件の高速検査、Codex + Oriedita評価、評価指摘を使った再生成の最大10サイクル
+- 3候補の生成、9件の高速検査、Oriedita + Groq視覚評価、評価指摘を使った再生成の最大10サイクル
 - CC0展開図2,157件の知識検索と、モチーフ別の構造参照
 - Orieditaで折れる山折り・谷折り配置の探索
 - Orieditaで検証した展開図表示
@@ -25,11 +25,14 @@ npm run dev
 
 ## Local Oriedita worker
 
-CodexへChatGPTアカウントでログインし、カスタム版OrieditaをビルドしたMacで実行します。
+`GROQ_API_KEY`を環境変数へ設定し、カスタム版OrieditaをビルドしたMacで実行します。
 
 ```bash
 npm run local:oriedita
 ```
+
+Macの常駐サービスでは、APIキーをログインキーチェーンの
+`jp.ito-pj.ori-ai.groq`へ保存すると自動的に読み込みます。キーをサイトやGitHubへは保存しません。
 
 Macへのログイン時に自動起動させる場合:
 
@@ -39,7 +42,7 @@ npm run local:install
 
 ローカルサーバーは `127.0.0.1:8788` のみに接続し、サイトから受け取ったジョブを1件ずつ処理します。
 ワーカーは3候補を高速に比較し、Orieditaで折れる山折り・谷折り配置を探したあと、
-Codexが折り上がりを評価します。合格点未満の場合は、指摘された部位・向き・対称性を
+Groqの視覚モデルが折り上がりを評価します。合格点未満の場合は、指摘された部位・向き・対称性を
 次の候補生成へ戻し、合格点に達するか最大10サイクルまで生成→評価→再生成を続けます。
 ミウラ折り、水爆折り、フラッシャー、箱ひだなど登録済みの構造名が入力された場合は、
 添付コレクション由来のCC0展開図を検索し、変更せずOrieditaへ渡します。
@@ -78,8 +81,8 @@ npm test
 
 ## Oracle Cloud API
 
-公開利用時は、Oracle Cloud Always FreeのAmpere A1 VMでOrieditaとCodexを
-常時起動します。VMはHTTPSのAPIだけを公開し、OpenAI APIキーをサーバーの
+公開利用時は、Oracle Cloud Always FreeのAmpere A1 VMでOrieditaとGroq連携APIを
+常時起動します。VMはHTTPSのAPIだけを公開し、Groq APIキーをサーバーの
 環境変数として保持します。構築手順は `deploy/oracle/README.md` にあります。
 
 ## Publishing

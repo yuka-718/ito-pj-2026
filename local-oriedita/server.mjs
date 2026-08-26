@@ -1,8 +1,7 @@
 #!/usr/bin/env node
 
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { createWriteStream } from "node:fs";
 import { access, copyFile, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -22,6 +21,7 @@ import {
 } from "./fast-evaluation.mjs";
 import { createMountainValleyVariants } from "./fold-repair.mjs";
 import { foldGeometrySignature, regenerateCandidatePool } from "./regeneration.mjs";
+import { DEFAULT_GROQ_MODEL, requestGroqEvaluation } from "./groq-evaluator.mjs";
 import {
   ApiInputError,
   createOpenApiDocument,
@@ -33,7 +33,6 @@ import {
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
 const workRoot = resolve(projectRoot, "work", "local-jobs");
-const resultSchema = resolve(here, "result.schema.json");
 const knowledgePack = await loadKnowledgePack();
 const port = Number.parseInt(process.env.ORI_AI_LOCAL_PORT ?? "8788", 10);
 const host = process.env.ORI_AI_LOCAL_HOST ?? "127.0.0.1";
@@ -44,11 +43,9 @@ const jobTimeoutMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_JOB_TIM
 const rateWindowMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_RATE_WINDOW_MS ?? "21600000", 10));
 const maxJobsPerWindow = Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_JOBS_PER_WINDOW ?? "3", 10));
 const trustProxy = process.env.ORI_AI_TRUST_PROXY === "1";
-const codexModel = process.env.ORI_AI_CODEX_MODEL ?? "gpt-5.6-terra";
-const codexBin = process.env.ORI_AI_CODEX_BIN
-  ?? "/Applications/ChatGPT.app/Contents/Resources/codex";
-const orieditaMcpServer = process.env.ORIEDITA_MCP_SERVER
-  ?? "/Users/yukaito/Documents/oriedita/oriedita-mcp/server.mjs";
+const groqModel = process.env.ORI_AI_GROQ_MODEL ?? DEFAULT_GROQ_MODEL;
+const groqEndpoint = process.env.ORI_AI_GROQ_ENDPOINT
+  ?? "https://api.groq.com/openai/v1/chat/completions";
 const orieditaJar = resolve(process.env.ORIEDITA_JAR
   ?? "/Users/yukaito/Documents/oriedita/oriedita/target/oriedita-1.1.4-SNAPSHOT.jar");
 const orieditaJava = process.env.ORIEDITA_JAVA ?? "java";
@@ -58,6 +55,23 @@ const orieditaRuntime = resolve(process.env.ORIEDITA_MCP_RUNTIME_DIR
 const connectionFile = resolve(orieditaRuntime, "connection.json");
 const orieditaLogFile = resolve(orieditaRuntime, "oriedita-api.log");
 const apiToken = process.env.ORI_AI_API_TOKEN?.trim() ?? "";
+
+function loadGroqApiKey() {
+  const configured = process.env.GROQ_API_KEY?.trim();
+  if (configured) return configured;
+  if (process.platform !== "darwin") return "";
+  try {
+    return execFileSync(
+      "/usr/bin/security",
+      ["find-generic-password", "-s", "jp.ito-pj.ori-ai.groq", "-w"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+  } catch {
+    return "";
+  }
+}
+
+const groqApiKey = loadGroqApiKey();
 
 const allowedOrigins = new Set([
   "https://yuka-718.github.io",
@@ -323,112 +337,35 @@ async function createOrieditaFoldJob(input) {
   return job;
 }
 
-function workerPrompt(job) {
-  if (job.knowledgeMatch) {
-    const match = publicKnowledgeMatch(job.knowledgeMatch);
-    return `あなたは伊藤PJの評価担当です。検索済みの登録構造を変更せず、Orieditaで平坦折り計算を1回だけ確認してください。
-
-検索結果:
-- title: ${match.title}
-- family: ${match.family}
-- license: ${match.license}
-- foldability: ${match.foldability}
-
-必ず行うこと:
-1. Orieditaのget_statusを呼び、open_fileで input.fold を開く。
-2. input.foldの線・頂点・割当は変更しない。
-3. foldActionを1回実行し、get_folded_figureで折り上がりを確認する。
-4. get_folded_figure確認後はinput.foldを開いた状態のままにし、foldActionをもう一度実行しない。
-5. 見た目は0°・90°・180°・270°の回転を同一として評価する。
-6. この知識パックは合成構造であり、完成作品や3Dモデルだとは判定しない。
-7. JSONのiterationsは1、stop_reasonはexact_knowledge_validationとする。
-
-制約:
-- 作業ディレクトリ以外のファイルは変更しない。
-- サブエージェントは使わない。
-- 実際に折れない案を折れると断定しない。
-- 最終回答は指定されたJSONスキーマだけを返す。`;
+async function runGroqJudge(job) {
+  const foldedFigure = await orieditaRequest("/folded-figure");
+  let referenceImage = null;
+  if (job.referencePath) {
+    const extension = job.referencePath.split(".").at(-1)?.toLowerCase();
+    const mimeType = extension === "jpg" || extension === "jpeg"
+      ? "image/jpeg"
+      : extension === "webp" ? "image/webp" : "image/png";
+    referenceImage = { mimeType, data: (await readFile(job.referencePath)).toString("base64") };
   }
-  return `あなたは伊藤PJの折り紙評価担当です。これは生成→評価→再生成ループの第${job.cycle}サイクル目です。高速な9項目の決定論チェックとPareto選択は完了済みです。CodexからOriedita MCPを操作し、このサイクルの選択案を評価してください。
-
-作業ディレクトリ内の入力:
-- brief.txt: 作りたい折り紙
-- goal.json: モチーフの部位・向き・対称性と物理条件
-- candidate-evaluation.json: 3候補の物理・見た目・複雑さを分離した高速評価
-- knowledge-references.json と reference-*.fold: 人間の設計知識を模倣するための構造参照。完成作品ではない
-- input.fold: Pareto候補から選ばれた最終確認対象
-${job.referencePath ? `- ${job.referencePath.split("/").at(-1)}: 参考画像` : "- 参考画像なし"}
-
-必ず行うこと:
-1. Orieditaのget_statusを呼び、open_fileで input.fold を開く。
-2. foldActionを実行し、get_folded_figureで折り上がりを確認する。
-3. input.foldは変更しない。物理条件の結果はcandidate-evaluation.jsonを尊重し、見た目を採点する。
-4. goal.jsonの部位が折り上がりの輪郭で識別できるかを評価する。0°・90°・180°・270°の回転は同一として扱う。
-5. 参考画像がある場合は輪郭と部位配置を比較する。reference-*.foldを完成形の正解として扱わない。
-6. get_folded_figure確認後はinput.foldを開いた状態のままにし、foldActionをもう一度実行しない。
-7. 次の再生成で直せるよう、issuesには不足している部位名、向き、太さ、対称性を具体的に書く。
-8. JSONのiterationsは1、stop_reasonはcycle_visual_judgeとする。
-
-制約:
-- 一枚の正方形、切断なし、接着なしを守る。
-- 作業ディレクトリ以外のファイルは変更しない。
-- サブエージェントは使わず、この評価セッションだけで完了する。
-- 実際に折れない案を折れると断定しない。
-- Orieditaの平坦折り画像を立体完成形や折り順の証明だと断定しない。
-- 最終回答は指定されたJSONスキーマだけを返す。`;
-}
-
-function runCodex(job) {
-  return new Promise((resolveRun, rejectRun) => {
-    const outputPath = join(job.directory, "evaluation.json");
-    const logPath = join(job.directory, "codex.log");
-    const log = createWriteStream(logPath, { flags: "a", mode: 0o600 });
-    const args = [
-      "exec",
-      "--ephemeral",
-      "--ignore-user-config",
-      "--color", "never",
-      "--approve-for-me",
-      "--model", codexModel,
-      "--config", "model_reasoning_effort=\"medium\"",
-      "--config", "mcp_servers.oriedita.command=\"node\"",
-      "--config", `mcp_servers.oriedita.args=[${JSON.stringify(orieditaMcpServer)}]`,
-      "--cd", job.directory,
-      "--output-schema", resultSchema,
-      "--output-last-message", outputPath,
-    ];
-    if (job.referencePath) args.push("--image", job.referencePath);
-    args.push("-");
-
-    const child = spawn(codexBin, args, {
-      cwd: job.directory,
-      env: { ...process.env, NO_COLOR: "1" },
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      child.kill("SIGTERM");
-      const forceKill = setTimeout(() => child.kill("SIGKILL"), 5_000);
-      forceKill.unref();
-    }, jobTimeoutMs);
-    timeout.unref();
-    child.stdout.pipe(log, { end: false });
-    child.stderr.pipe(log, { end: false });
-    child.stdin.end(workerPrompt(job));
-    child.once("error", (error) => {
-      clearTimeout(timeout);
-      log.end();
-      rejectRun(error);
-    });
-    child.once("exit", (code, signal) => {
-      clearTimeout(timeout);
-      log.end();
-      if (timedOut) rejectRun(new Error("処理時間の上限を超えました"));
-      else if (code === 0) resolveRun(outputPath);
-      else rejectRun(new Error(`Codexが終了しました (${signal ?? code ?? "unknown"})`));
-    });
+  const { judge, metadata } = await requestGroqEvaluation({
+    apiKey: groqApiKey,
+    model: groqModel,
+    endpoint: groqEndpoint,
+    prompt: job.prompt,
+    goal: job.goal,
+    preflight: job.preflight,
+    cycle: job.cycle,
+    knowledgeMatch: job.knowledgeMatch,
+    foldedImage: foldedFigure,
+    referenceImage,
+    timeoutMs: Math.min(jobTimeoutMs, 120_000),
   });
+  const outputPath = join(job.directory, "evaluation.json");
+  await Promise.all([
+    writeFile(outputPath, `${JSON.stringify(judge, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(job.directory, "groq-evaluation.json"), `${JSON.stringify({ judge, metadata }, null, 2)}\n`, { mode: 0o600 }),
+  ]);
+  return outputPath;
 }
 
 async function readConnection() {
@@ -613,7 +550,7 @@ async function persistFinalEvaluation(job, judge, completed, issues = []) {
   finalRecord.metrics.assignment = job.assignmentRepair?.assignment ?? null;
   await Promise.all([
     writeFile(
-      join(job.directory, "iterations", "10-oriedita_final_fold_and_visual_judge.json"),
+      join(job.directory, "iterations", "10-oriedita_final_fold_and_groq_visual_judge.json"),
       `${JSON.stringify(finalRecord, null, 2)}\n`,
       { mode: 0o600 },
     ),
@@ -637,7 +574,7 @@ async function collectResult(job, evaluationPath) {
   const activeFile = typeof state.file === "string" ? resolve(state.file) : "";
   if (!activeFile.startsWith(`${job.directory}/`)) {
     await persistFinalEvaluation(job, judge, false, ["最終候補がOrieditaで開かれていません"]);
-    throw new Error("Codexがこのジョブの展開図をOrieditaで開けませんでした");
+    throw new Error("このジョブの展開図をOrieditaで開けませんでした");
   }
   if (!state.foldedFigures?.completed) {
     await persistFinalEvaluation(job, judge, false, ["Orieditaの折り上がり計算が未完了です"]);
@@ -767,7 +704,7 @@ async function runDesignLoop(job) {
     let record;
     try {
       await selectOrieditaFoldableAssignment(cycleJob);
-      const evaluationPath = await runCodex(cycleJob);
+      const evaluationPath = await runGroqJudge(cycleJob);
       const result = await collectResult(cycleJob, evaluationPath);
       record = {
         cycle,
@@ -909,7 +846,7 @@ async function executeJob(job) {
   job.status = "running";
   job.message = job.type === "oriedita-fold"
     ? "Orieditaで折り上がりを計算中"
-    : "CodexがOrieditaを操作中";
+    : "Orieditaで折り上げ、Groqが評価中";
   job.startedAt = new Date().toISOString();
   try {
     if (job.type === "oriedita-fold") {
@@ -970,6 +907,7 @@ async function handle(request, response) {
         maxIterations,
         maxCycles,
         targetScore,
+        evaluator: { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
       },
     }, origin);
     return;
@@ -986,6 +924,7 @@ async function handle(request, response) {
         authentication: apiToken ? "bearer" : "none",
         maxCycles,
         targetScore,
+        evaluator: { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
         oriedita: await inspectOriedita(),
       },
     }, origin);
@@ -1030,7 +969,7 @@ async function handle(request, response) {
   throw new HttpError(404, "見つかりません");
 }
 
-await Promise.all([mkdir(workRoot, { recursive: true, mode: 0o700 }), access(resultSchema)]);
+await mkdir(workRoot, { recursive: true, mode: 0o700 });
 const server = createServer((request, response) => {
   void handle(request, response).catch((error) => {
     const status = error instanceof HttpError || error instanceof ApiInputError ? error.status : 500;

@@ -9,9 +9,8 @@ User=ori-ai
 Group=ori-ai
 WorkingDirectory=/opt/ori-ai/app
 Environment=HOME=/var/lib/ori-ai
-Environment=CODEX_HOME=/var/lib/ori-ai/codex
-Environment=PATH=/opt/node/bin:/var/lib/ori-ai/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=ORI_AI_CODEX_BIN=/var/lib/ori-ai/.local/bin/codex
+Environment=PATH=/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=ORI_AI_GROQ_MODEL=qwen/qwen3.6-27b
 Environment=ORIEDITA_MCP_SERVER=/opt/ori-ai/oriedita-mcp/server.mjs
 Environment=ORIEDITA_JAR=/opt/ori-ai/oriedita.jar
 EnvironmentFile=/etc/ori-ai/ori-ai.env

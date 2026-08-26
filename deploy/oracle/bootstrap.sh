@@ -47,7 +47,7 @@ mv /opt/node.next /opt/node
 if ! id -u ori-ai >/dev/null 2>&1; then
   useradd --system --create-home --home-dir /var/lib/ori-ai --shell /usr/sbin/nologin ori-ai
 fi
-install -d -o ori-ai -g ori-ai -m 0750 /var/lib/ori-ai /var/lib/ori-ai/codex
+install -d -o ori-ai -g ori-ai -m 0750 /var/lib/ori-ai
 
 deployment_dir="/opt/ori-ai.next"
 rm -rf "$deployment_dir"
@@ -68,21 +68,14 @@ chown -R ori-ai:ori-ai /opt/ori-ai
 sudo -u ori-ai -H env PATH="/opt/node/bin:/usr/bin:/bin" \
   /opt/node/bin/npm --prefix /opt/ori-ai/oriedita-mcp ci --omit=dev
 
-if [[ ! -x /var/lib/ori-ai/.local/bin/codex ]]; then
-  sudo -u ori-ai -H bash -c 'curl -fsSL https://chatgpt.com/codex/install.sh | sh'
-fi
-
 set -a
 # shellcheck disable=SC1091
 source /etc/ori-ai/ori-ai.env
 set +a
-if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-  echo "OPENAI_API_KEY is missing from /etc/ori-ai/ori-ai.env" >&2
+if [[ -z "${GROQ_API_KEY:-}" ]]; then
+  echo "GROQ_API_KEY is missing from /etc/ori-ai/ori-ai.env" >&2
   exit 1
 fi
-printf '%s' "$OPENAI_API_KEY" | sudo -u ori-ai -H env \
-  HOME=/var/lib/ori-ai CODEX_HOME=/var/lib/ori-ai/codex \
-  /var/lib/ori-ai/.local/bin/codex login --with-api-key
 
 install -m 0644 /opt/ori-ai/app/deploy/oracle/ori-ai.service /etc/systemd/system/ori-ai.service
 sed "s/__ORI_AI_HOSTNAME__/$public_hostname/g" \

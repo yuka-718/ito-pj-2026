@@ -8,12 +8,12 @@ if [[ -z "$ssh_target" || -z "$public_hostname" ]]; then
   echo "Usage: deploy-oracle.sh SSH_TARGET PUBLIC_HOSTNAME" >&2
   exit 1
 fi
-if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-  read -r -s -p "OpenAI API key: " OPENAI_API_KEY
+if [[ -z "${GROQ_API_KEY:-}" ]]; then
+  read -r -s -p "Groq API key: " GROQ_API_KEY
   echo
 fi
-if [[ -z "$OPENAI_API_KEY" ]]; then
-  echo "OpenAI API key is required." >&2
+if [[ -z "$GROQ_API_KEY" ]]; then
+  echo "Groq API key is required." >&2
   exit 1
 fi
 
@@ -24,7 +24,7 @@ trap 'rm -f "$archive" "$env_file"' EXIT
 
 umask 077
 {
-  printf 'OPENAI_API_KEY=%q\n' "$OPENAI_API_KEY"
+  printf 'GROQ_API_KEY=%q\n' "$GROQ_API_KEY"
   printf '%s\n' \
     'ORI_AI_LOCAL_HOST=127.0.0.1' \
     'ORI_AI_TRUST_PROXY=1' \
@@ -34,7 +34,7 @@ umask 077
     'ORI_AI_MAX_JOBS_PER_WINDOW=3' \
     'ORI_AI_RATE_WINDOW_MS=21600000' \
     'ORI_AI_JOB_TIMEOUT_MS=1200000' \
-    'ORI_AI_CODEX_MODEL=gpt-5.6-terra'
+    'ORI_AI_GROQ_MODEL=qwen/qwen3.6-27b'
 } > "$env_file"
 
 scp "$archive" "$ssh_target:/tmp/ori-ai-release.tar.gz"

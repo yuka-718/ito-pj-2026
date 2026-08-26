@@ -85,11 +85,24 @@ function fileToDataUrl(file: File) {
 }
 
 async function waitForJob(id: string, onProgress?: (job: LocalJob) => void) {
+  let transientFailures = 0;
   for (let attempt = 0; attempt < 360; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, attempt < 4 ? 1200 : 2500));
-    const response = await apiFetch(`/jobs/${id}`);
+    let response: Response;
+    try {
+      response = await apiFetch(`/jobs/${id}`);
+    } catch {
+      transientFailures += 1;
+      if (transientFailures <= 12) continue;
+      throw new Error("処理状況の通信が繰り返し途切れました");
+    }
+    if (response.status >= 500 && transientFailures < 12) {
+      transientFailures += 1;
+      continue;
+    }
     const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
     if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理状況を取得できませんでした");
+    transientFailures = 0;
     onProgress?.(payload.job);
     if (payload.job.status === "done" && payload.job.result) return payload.job.result;
     if (payload.job.status === "failed") throw new Error(payload.job.error ?? "Oriedita処理に失敗しました");

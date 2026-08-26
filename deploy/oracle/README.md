@@ -5,7 +5,7 @@ Use an Ubuntu Ampere A1 instance in the tenancy home region with 2 OCPUs and
 
 The deployment bundle contains the current site backend, the locally built
 Oriedita MCP JAR, and its MCP adapter. The VM runs Oriedita under Xvfb, exposes
-only Caddy on ports 80/443, and keeps the OpenAI key in a root-readable
+only Caddy on ports 80/443, and keeps the Groq key in a root-readable
 environment file.
 
 For a public IP such as `203.0.113.10`, use `203-0-113-10.sslip.io` as the

@@ -84,7 +84,7 @@ test("merges the final Oriedita judge as validation ten while preserving legacy 
   });
   assert.equal(merged.iterations, 10);
   assert.equal(merged.validations.length, 10);
-  assert.equal(merged.validations[9].kind, "oriedita_codex");
+  assert.equal(merged.validations[9].kind, "oriedita_groq");
   assert.equal(typeof merged.score, "number");
   assert.equal(typeof merged.summary, "string");
   assert.ok(merged.physical && merged.appearance && merged.foldability);
