@@ -25,7 +25,7 @@ function resultWithSteps(count = 10) {
   };
 }
 
-test("Codex loop prompt requires one crease, fold calculation, image review, and rollback per attempt", () => {
+test("Codex loop prompt requires one crease, fold calculation, image review when valid, and rollback", () => {
   const prompt = buildCodexLoopPrompt({
     prompt: "翼を広げた鶴",
     goal: { parts: [{ label: "翼" }] },
@@ -35,7 +35,7 @@ test("Codex loop prompt requires one crease, fold calculation, image review, and
     maximumIterations: 10,
   });
 
-  assert.match(prompt, /ちょうど10回/);
+  assert.match(prompt, /候補の追加と評価をちょうど10回/);
   assert.match(prompt, /一回につき add_line をちょうど1回/);
   assert.match(prompt, /calculate_fold/);
   assert.match(prompt, /get_folded_figure/);

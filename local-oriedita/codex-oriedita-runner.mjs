@@ -72,7 +72,7 @@ ${safeJson({ description: prompt, goal })}
 
 必須手順:
 1. Oriedita MCPの get_status を呼び、open_file で初期状態を開く。
-2. Oriedita自体が回復不能な場合を除き、候補の追加と画像評価をちょうど${maximumIterations}回行う。必ず一回につき add_line をちょうど1回だけ実行する。線の両端は get_crease_pattern で読んだ正方形の境界上に置き、色はMOUNTAINかVALLEYだけを使う。
+2. Oriedita自体が回復不能な場合を除き、候補の追加と評価をちょうど${maximumIterations}回行う。必ず一回につき add_line をちょうど1回だけ実行する。線の両端は get_crease_pattern で読んだ正方形の境界上に置き、色はMOUNTAINかVALLEYだけを使う。
 3. 各候補で calculate_fold を呼ぶ。started=falseまたはviolationCount>0なら不採用として、直前に保存した最良FOLDをopen_fileで開き直して別案へ進む。
 4. 計算が始まったら get_folded_figure を呼び、返された画像の輪郭を目標データと比較する。部位、突起、太さ、左右バランスを画像だけから0〜100点で評価する。
 5. 良化した候補は export_file で最良FOLDとして保存する。悪化した候補は最良FOLDをopen_fileで開き直して巻き戻す。同じ線を繰り返さない。
@@ -126,6 +126,7 @@ export async function runCodexOrieditaLoop({
   await appendFile(logPath, `Started ${new Date().toISOString()}\n`, { mode: 0o600 });
   let toolCompletions = 0;
   let addedLines = 0;
+  let calculatedFolds = 0;
   let reviewedFigures = 0;
   let activityBuffer = "";
   await new Promise((resolveRun, rejectRun) => {
@@ -142,9 +143,10 @@ export async function runCodexOrieditaLoop({
       activityBuffer = lines.pop() ?? "";
       for (const line of lines) {
         if (/oriedita\/add_line \(completed\)/.test(line)) addedLines += 1;
+        if (/oriedita\/calculate_fold \(completed\)/.test(line)) calculatedFolds += 1;
         if (/oriedita\/get_folded_figure \(completed\)/.test(line)) reviewedFigures += 1;
       }
-      toolCompletions = Math.min(addedLines, reviewedFigures);
+      toolCompletions = Math.min(addedLines, calculatedFolds);
       onProgress(Math.min(boundedIterations, toolCompletions));
     };
     child.stdout.on("data", writeChunk);
@@ -165,8 +167,8 @@ export async function runCodexOrieditaLoop({
     });
   });
 
-  if (addedLines !== boundedIterations || reviewedFigures < boundedIterations) {
-    throw new Error(`CodexのOriedita実操作が完了していません (折り線 ${addedLines}/${boundedIterations}、画像評価 ${reviewedFigures}/${boundedIterations})`);
+  if (addedLines !== boundedIterations || calculatedFolds < boundedIterations || reviewedFigures < 1) {
+    throw new Error(`CodexのOriedita実操作が完了していません (折り線 ${addedLines}/${boundedIterations}、折り計算 ${calculatedFolds}/${boundedIterations}、画像確認 ${reviewedFigures})`);
   }
 
   const result = JSON.parse(await readFile(outputPath, "utf8"));
