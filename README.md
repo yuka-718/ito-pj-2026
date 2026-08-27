@@ -1,18 +1,16 @@
 # ORIAI — 伊藤PJ 2026
 
 未踏ジュニア2026「LLMを用いた折り紙展開図作成ソフト」のブラウザ版プロトタイプです。
-プロンプトまたは参考画像を入力して、展開図とFOLDデータから計算した3Dシミュレーションを表示します。
+公開先は [GitHub Pages](https://yuka-718.github.io/oriai/) です。
 
 ## What works
 
 - プロンプト入力
 - 参考画像アップロード
-- 正方形から折り線を一本ずつ追加する最大10手の探索
-- 各手で2分岐をOrieditaへ順番に送り、平坦折り・輪郭・折りやすさを分離して選択
-- 物理条件に失敗した分岐を捨て、保存した親FOLDへ戻って別の折り線を試す探索履歴
-- Orieditaの2D平坦折り画像をGroqが比較し、次の一手へ輪郭上の焦点を返す評価
-- Orieditaで検証した展開図表示
-- OrieditaのFOLD出力をOrigami Simulatorへ渡すドラッグ可能な3D表示
+- ブラウザ内での展開図候補生成
+- ドラッグで回転できる3Dプレビュー
+- 生成中は結果を隠し、完了後に展開図と3Dを同時表示
+- 外部APIやローカルMacへ依存しない公開動作
 
 ## Local development
 
@@ -23,7 +21,9 @@ npm run dev
 
 `http://localhost:3000/` で確認できます。
 
-## Local Oriedita worker
+## Legacy research worker
+
+以下のOriedita連携コードは研究・検証用に残していますが、現在の公開サイトの生成ボタンからは使用しません。
 
 `GROQ_API_KEY`を環境変数へ設定し、カスタム版OrieditaをビルドしたMacで実行します。
 
@@ -70,9 +70,7 @@ curl -X POST http://127.0.0.1:8788/v1/oriedita/fold \
 `job.id` を `/v1/oriedita/jobs/{jobId}` で取得します。公開環境では
 `ORI_AI_API_TOKEN` を設定し、`Authorization: Bearer ...` を付けます。
 
-公開APIの固定URLは `https://ori-ai-ito-pj-2026.pipipiimside.chatgpt.site/api`
-です。公開プロキシは上記の必要なAPIパスだけをOriedita実行環境へ転送し、
-任意の画面操作やローカルファイル操作は公開しません。
+旧公開プロキシは現在のGitHub Pages版からは呼び出しません。
 
 検証用Macの公開トンネルは `npm run local:tunnel:install` で常駐します。
 トンネルURLが失効した場合は自動的に再作成してruntimeブランチへ通知するため、
