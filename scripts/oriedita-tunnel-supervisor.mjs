@@ -77,8 +77,8 @@ function startTunnel() {
       "-T",
       "-o", "BatchMode=yes",
       "-o", "StrictHostKeyChecking=accept-new",
-      "-o", "ServerAliveInterval=30",
-      "-o", "ServerAliveCountMax=3",
+      "-o", "ServerAliveInterval=10",
+      "-o", "ServerAliveCountMax=2",
       "-o", "ExitOnForwardFailure=yes",
       "-R", "80:127.0.0.1:8788",
       "nokey@localhost.run",
@@ -144,12 +144,12 @@ async function supervise() {
 
       let failures = 0;
       while (child.exitCode == null) {
-        await delay(30_000);
+        await delay(5_000);
         if (await healthy(`${url}/health`)) {
           failures = 0;
         } else {
           failures += 1;
-          if (failures >= 3) throw new Error("quick tunnel health check failed");
+          if (failures >= 2) throw new Error("quick tunnel health check failed");
         }
       }
     } catch (error) {

@@ -11,6 +11,8 @@ import {
 } from "./origami-engine";
 
 const API_DISCOVERY_URL = "https://raw.githubusercontent.com/yuka-718/oriai/runtime/oriedita-upstream.json";
+const API_RECONNECT_ATTEMPTS = 30;
+const API_RECONNECT_DELAY_MS = 2_000;
 let cachedApiOrigin = "";
 
 type UploadedImage = {
@@ -71,23 +73,62 @@ async function resolveApiOrigin(force = false) {
   return origin;
 }
 
-async function apiFetch(path: string, init?: RequestInit) {
+const delay = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+
+async function waitForApiOrigin() {
   let lastError: unknown = null;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < API_RECONNECT_ATTEMPTS; attempt += 1) {
     try {
-      const origin = await resolveApiOrigin(attempt > 0 || init?.method === "POST");
+      const origin = await resolveApiOrigin(attempt > 0);
+      const response = await fetch(`${origin}/health`, { mode: "cors", cache: "no-store" });
+      if (response.ok) return origin;
+      lastError = new Error("生成サーバーが再接続中です");
+    } catch (error) {
+      lastError = error;
+    }
+    cachedApiOrigin = "";
+    if (attempt + 1 < API_RECONNECT_ATTEMPTS) await delay(API_RECONNECT_DELAY_MS);
+  }
+  throw new Error(
+    lastError instanceof Error && !/Failed to fetch/i.test(lastError.message)
+      ? lastError.message
+      : "生成サーバーへ接続できませんでした。少し待ってからもう一度お試しください",
+  );
+}
+
+async function apiFetch(path: string, init?: RequestInit) {
+  if ((init?.method ?? "GET").toUpperCase() === "POST") {
+    const origin = await waitForApiOrigin();
+    try {
+      return await fetch(`${origin}${path}`, { ...init, mode: "cors", cache: "no-store" });
+    } catch {
+      cachedApiOrigin = "";
+      throw new Error("生成サーバーとの通信が切れました。もう一度お試しください");
+    }
+  }
+
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const origin = await resolveApiOrigin(attempt > 0);
       const response = await fetch(`${origin}${path}`, { ...init, mode: "cors", cache: "no-store" });
-      if (response.status >= 500 && attempt === 0) {
+      if (response.status >= 500 && attempt < 5) {
         cachedApiOrigin = "";
+        await delay(1_000);
         continue;
       }
       return response;
     } catch (error) {
       lastError = error;
       cachedApiOrigin = "";
+      if (attempt < 5) await delay(1_000);
     }
   }
-  throw lastError instanceof Error ? lastError : new Error("Oriedita実行環境へ接続できませんでした");
+  throw new Error(
+    lastError instanceof Error && !/Failed to fetch/i.test(lastError.message)
+      ? lastError.message
+      : "生成サーバーとの通信が切れました。再接続しています",
+  );
 }
 
 async function waitForJob(id: string, onMessage: (message: string) => void) {

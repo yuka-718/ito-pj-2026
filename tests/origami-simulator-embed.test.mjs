@@ -50,6 +50,9 @@ test("application waits for the Codex and Oriedita job before showing either res
   assert.match(page, /candidateToFold/);
   assert.match(page, /generateCandidates/);
   assert.match(page, /apiFetch\("\/jobs"/);
+  assert.match(page, /waitForApiOrigin\(\)/);
+  assert.match(page, /API_RECONNECT_ATTEMPTS = 30/);
+  assert.match(page, /生成サーバーへ接続できませんでした/);
   assert.match(page, /waitForJob\(payload\.job\.id/);
   assert.match(page, /\{result && \(\s*<section className="outputs"/);
   assert.match(page, /src=\{result\.creaseImage\}/);
