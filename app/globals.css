@@ -135,6 +135,7 @@ a { color: inherit; text-decoration: none; }
 .creaseStage, .modelStage { min-height: 0; height: min(660px, calc(100vh - 350px)); padding: 28px; display: grid; place-items: center; }
 .creaseStage { background: linear-gradient(145deg, rgba(36, 87, 255, .10) 0 46%, rgba(0, 168, 120, .12) 46% 72%, rgba(255, 209, 38, .16) 72% 100%); }
 .modelStage { position: relative; overflow: hidden; background: linear-gradient(155deg, #fff 0 55%, rgba(255, 74, 54, .10) 55% 72%, rgba(36, 87, 255, .12) 72% 100%); }
+.foldedModelFallback { position: absolute; inset: 9%; z-index: 0; display: block; width: 82%; height: 82%; object-fit: contain; }
 .creasePattern, .orieditaCrease { display: block; width: min(100%, 570px); max-height: 100%; aspect-ratio: 1; overflow: hidden; border: 7px solid #fff; border-radius: 5px; background: #fff; box-shadow: 0 18px 38px rgba(16, 32, 68, .14); }
 .orieditaCrease { object-fit: contain; }
 .paper { fill: #fffefd; }
@@ -146,6 +147,7 @@ a { color: inherit; text-decoration: none; }
 .foldCenter { fill: var(--ink); }
 .modelCanvas { position: relative; z-index: 1; display: block; width: 100%; height: 100%; min-height: 340px; touch-action: none; cursor: grab; }
 .modelCanvas:active { cursor: grabbing; }
+.modelStage > .simulatorViewport { position: absolute; inset: 0; z-index: 1; }
 .simulatorViewport { position: relative; z-index: 1; width: 100%; height: 100%; min-height: 340px; overflow: hidden; border-radius: 5px; }
 .simulatorViewport > .modelCanvas { position: absolute; inset: 0; }
 .origamiSimulatorFrame { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; border: 0; opacity: 0; background: transparent; touch-action: none; transition: opacity .25s ease; }

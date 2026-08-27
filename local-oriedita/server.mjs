@@ -29,6 +29,8 @@ import {
 } from "./groq-step-evaluator.mjs";
 import { evaluatePartialFold } from "./partial-evaluation.mjs";
 import { runStepSearch } from "./step-search.mjs";
+import { createSquareRootFold } from "./crease-actions.mjs";
+import { runCodexOrieditaLoop } from "./codex-oriedita-runner.mjs";
 import {
   ApiInputError,
   createOpenApiDocument,
@@ -46,9 +48,10 @@ const host = process.env.ORI_AI_LOCAL_HOST ?? "127.0.0.1";
 const maxIterations = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_ITERATIONS ?? "10", 10)));
 const maxCycles = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_CYCLES ?? String(maxIterations), 10)));
 const targetScore = Math.min(100, Math.max(1, Number.parseInt(process.env.ORI_AI_TARGET_SCORE ?? "85", 10)));
-const designMode = process.env.ORI_AI_DESIGN_MODE === "regeneration"
-  ? "regeneration"
-  : "crease_step_search";
+const configuredDesignMode = process.env.ORI_AI_DESIGN_MODE?.trim();
+const designMode = configuredDesignMode === "regeneration" || configuredDesignMode === "crease_step_search"
+  ? configuredDesignMode
+  : "codex_mcp_loop";
 const stepBranchFactor = Math.min(3, Math.max(1, Number.parseInt(process.env.ORI_AI_STEP_BRANCH_FACTOR ?? "2", 10)));
 const stepBeamWidth = Math.min(2, Math.max(1, Number.parseInt(process.env.ORI_AI_STEP_BEAM_WIDTH ?? "1", 10)));
 const knowledgeSearchEnabled = false;
@@ -1211,7 +1214,107 @@ async function runStepDesignLoop(job) {
   return finalizeStepSearchResult(job, search);
 }
 
+async function runCodexDesignLoop(job) {
+  const rootPath = join(job.directory, "codex-root.fold");
+  const finalFoldPath = join(job.directory, "final.fold");
+  const finalCreasePath = join(job.directory, "final-crease.png");
+  const source = job.candidateFolds[job.preflight.selectedIndex];
+  await writeFile(rootPath, `${JSON.stringify(createSquareRootFold(source), null, 2)}\n`, { mode: 0o600 });
+  const codexEvaluation = await runCodexOrieditaLoop({
+    directory: job.directory,
+    prompt: job.prompt,
+    goal: job.goal,
+    rootPath,
+    finalFoldPath,
+    finalCreasePath,
+    referencePath: job.referencePath,
+    maximumIterations: job.maxSteps,
+    timeoutMs: jobTimeoutMs,
+    onProgress: (step) => {
+      job.step = step;
+      job.cycle = step;
+      job.message = `CodexがOrieditaを操作・画像評価 ${step}/${job.maxSteps}`;
+    },
+  });
+
+  await access(finalFoldPath);
+  await orieditaRequest("/open", {
+    method: "POST",
+    body: JSON.stringify({ path: finalFoldPath }),
+  });
+  const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
+  if (!calculation?.started) throw new Error("Codexの最終候補に局所平坦折り違反があります");
+  const state = await waitForFold(30_000);
+  if (!state?.foldedFigures?.completed) throw new Error("Codexの最終候補をOrieditaで計算できませんでした");
+  await Promise.all([
+    orieditaRequest("/export", { method: "POST", body: JSON.stringify({ path: finalFoldPath }) }),
+    orieditaRequest("/export", { method: "POST", body: JSON.stringify({ path: finalCreasePath }) }),
+  ]);
+  const foldedFigure = await orieditaRequest("/folded-figure");
+  const foldedBytes = Buffer.from(foldedFigure.data, "base64");
+  await writeFile(join(job.directory, "final-folded.png"), foldedBytes, { mode: 0o600 });
+  const cycles = codexEvaluation.steps.map((step) => ({
+    cycle: step.step,
+    step: step.step,
+    status: step.accepted ? "accepted" : "rolled_back",
+    score: step.score,
+    issues: step.issues,
+    action: step.action,
+    summary: step.summary,
+  }));
+  const evaluation = {
+    score: codexEvaluation.score,
+    iterations: codexEvaluation.iterations,
+    stop_reason: codexEvaluation.stop_reason,
+    summary: codexEvaluation.summary,
+    issues: codexEvaluation.issues,
+    mode: "codex_oriedita_mcp_loop",
+    physical: {
+      score: Number(calculation?.violationCount) > 0 ? 0 : 100,
+      orieditaCompleted: true,
+      scope: "oriedita_flat_fold_2d",
+    },
+    appearance: {
+      score: codexEvaluation.score,
+      rotationNormalized: true,
+      dimensions: "2d_folded_figure_reviewed_by_codex",
+    },
+    foldability: {
+      score: Number(calculation?.violationCount) > 0 ? 0 : 100,
+      layerCount: "unknown",
+      clearanceIsProxy: true,
+    },
+    maxCycles: job.maxSteps,
+    targetScore,
+    bestCycle: codexEvaluation.best_step,
+    cycles,
+    steps: cycles,
+    search: {
+      stateType: "crease_pattern_prefix",
+      actionKind: "add_crease_via_oriedita_mcp",
+      evaluator: "codex_visual_review",
+      physicalScope: "oriedita_flat_fold_2d",
+      sequentialPhysicalFolding: false,
+      sequenceFeasibility: "unverified",
+    },
+  };
+  await writeFile(join(job.directory, "final-evaluation.json"), `${JSON.stringify(evaluation, null, 2)}\n`, { mode: 0o600 });
+  const [creaseBytes, foldBytes] = await Promise.all([
+    readFile(finalCreasePath),
+    readFile(finalFoldPath),
+  ]);
+  return {
+    evaluation,
+    knowledgeMatch: null,
+    knowledgeReferences: job.knowledgeReferences,
+    creaseImage: `data:image/png;base64,${creaseBytes.toString("base64")}`,
+    foldedImage: `data:${foldedFigure.mimeType};base64,${foldedBytes.toString("base64")}`,
+    foldFile: `data:application/json;base64,${foldBytes.toString("base64")}`,
+  };
+}
+
 async function runDesignLoop(job) {
+  if (job.designMode === "codex_mcp_loop") return runCodexDesignLoop(job);
   if (job.knowledgeMatch || job.designMode === "regeneration") return runRegenerationLoop(job);
   return runStepDesignLoop(job);
 }
@@ -1272,7 +1375,9 @@ async function executeJob(job) {
   job.status = "running";
   job.message = job.type === "oriedita-fold"
     ? "Orieditaで折り上がりを計算中"
-    : job.designMode === "crease_step_search"
+    : job.designMode === "codex_mcp_loop"
+      ? "CodexがOrieditaを一手ずつ操作・評価中"
+      : job.designMode === "crease_step_search"
       ? "折り線を一手ずつ追加し、OrieditaとGroqで評価中"
       : "Orieditaで折り上げ、Groqが評価中";
   job.startedAt = new Date().toISOString();
@@ -1338,7 +1443,9 @@ async function handle(request, response) {
         designMode,
         stepSearch: { maxSteps: maxCycles, branchFactor: stepBranchFactor, beamWidth: stepBeamWidth },
         knowledgeSearch: knowledgeSearchEnabled,
-        evaluator: { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
+        evaluator: designMode === "codex_mcp_loop"
+          ? { provider: "codex", model: "Codex CLI", configured: true }
+          : { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
       },
     }, origin);
     return;
@@ -1358,7 +1465,9 @@ async function handle(request, response) {
         designMode,
         stepSearch: { maxSteps: maxCycles, branchFactor: stepBranchFactor, beamWidth: stepBeamWidth },
         knowledgeSearch: knowledgeSearchEnabled,
-        evaluator: { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
+        evaluator: designMode === "codex_mcp_loop"
+          ? { provider: "codex", model: "Codex CLI", configured: true }
+          : { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
         oriedita: await inspectOriedita(),
       },
     }, origin);

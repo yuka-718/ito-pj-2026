@@ -63,7 +63,7 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <key>ORI_AI_SSH</key><string>${xml(ssh)}</string>
     <key>ORI_AI_LOCALTUNNEL</key><string>${xml(localtunnel)}</string>
     <key>ORI_AI_LOCALTUNNEL_SUBDOMAIN</key><string>oriai-ito-pj-2026</string>
-    <key>ORI_AI_TUNNEL_PROVIDER</key><string>localtunnel</string>
+    <key>ORI_AI_TUNNEL_PROVIDER</key><string>localhostrun</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>

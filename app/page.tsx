@@ -2,13 +2,16 @@
 
 import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 
-import Origami3D from "./Origami3D";
+import OrigamiSimulator3D from "./OrigamiSimulator3D";
 import {
   analyzeDescription,
-  candidateToSvg,
+  candidateToFold,
   generateCandidates,
   hashString,
 } from "./origami-engine";
+
+const API_DISCOVERY_URL = "https://raw.githubusercontent.com/yuka-718/oriai/runtime/oriedita-upstream.json";
+let cachedApiOrigin = "";
 
 type UploadedImage = {
   file: File;
@@ -16,25 +19,101 @@ type UploadedImage = {
   url: string;
 };
 
-type GeneratedResult = {
-  title: string;
-  creaseImage: string;
-  modelKey: string;
-  seed: number;
+type EvaluationStep = {
+  step: number;
+  score: number;
+  status: string;
 };
 
-function imageName(fileName: string) {
-  return fileName.replace(/\.[^.]+$/, "").trim() || "画像から作る折り紙";
+type Evaluation = {
+  score: number;
+  iterations: number;
+  summary: string;
+  mode: string;
+  steps?: EvaluationStep[];
+};
+
+type OrieditaResult = {
+  evaluation: Evaluation;
+  creaseImage: string;
+  foldedImage: string;
+  foldFile: string;
+};
+
+type LocalJob = {
+  id: string;
+  status: "queued" | "running" | "done" | "failed";
+  message: string;
+  result: OrieditaResult | null;
+  error: string | null;
+};
+
+function fileToDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("画像を読み取れませんでした"));
+    reader.readAsDataURL(file);
+  });
 }
 
-function svgDataUrl(svg: string) {
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+async function resolveApiOrigin(force = false) {
+  if (!force && cachedApiOrigin) return cachedApiOrigin;
+  const discovery = new URL(API_DISCOVERY_URL);
+  discovery.searchParams.set("refresh", String(Date.now()));
+  const response = await fetch(discovery, { cache: "no-store" });
+  if (!response.ok) throw new Error("Oriedita実行環境を見つけられませんでした");
+  const payload = await response.json() as { url?: unknown };
+  if (typeof payload.url !== "string") throw new Error("Oriedita実行環境のURLが不正です");
+  const origin = new URL(payload.url).origin;
+  if (!origin.startsWith("https://")) throw new Error("Oriedita実行環境へ安全に接続できません");
+  cachedApiOrigin = origin;
+  return origin;
+}
+
+async function apiFetch(path: string, init?: RequestInit) {
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const origin = await resolveApiOrigin(attempt > 0 || init?.method === "POST");
+      const response = await fetch(`${origin}${path}`, { ...init, mode: "cors", cache: "no-store" });
+      if (response.status >= 500 && attempt === 0) {
+        cachedApiOrigin = "";
+        continue;
+      }
+      return response;
+    } catch (error) {
+      lastError = error;
+      cachedApiOrigin = "";
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("Oriedita実行環境へ接続できませんでした");
+}
+
+async function waitForJob(id: string, onMessage: (message: string) => void) {
+  let transientFailures = 0;
+  for (let attempt = 0; attempt < 720; attempt += 1) {
+    await new Promise((resolve) => window.setTimeout(resolve, attempt < 3 ? 1200 : 2500));
+    try {
+      const response = await apiFetch(`/jobs/${id}`);
+      const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
+      if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理状況を取得できませんでした");
+      transientFailures = 0;
+      onMessage(payload.job.message);
+      if (payload.job.status === "done" && payload.job.result) return payload.job.result;
+      if (payload.job.status === "failed") throw new Error(payload.job.error ?? "生成に失敗しました");
+    } catch (error) {
+      transientFailures += 1;
+      if (transientFailures > 12) throw error;
+    }
+  }
+  throw new Error("生成処理がタイムアウトしました");
 }
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [image, setImage] = useState<UploadedImage | null>(null);
-  const [result, setResult] = useState<GeneratedResult | null>(null);
+  const [result, setResult] = useState<OrieditaResult | null>(null);
   const [runState, setRunState] = useState<"idle" | "running" | "error">("idle");
   const [message, setMessage] = useState("");
 
@@ -68,8 +147,7 @@ export default function Home() {
   async function generate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (runState === "running") return;
-
-    const description = prompt.trim() || (image ? imageName(image.name) : "");
+    const description = prompt.trim() || image?.name.replace(/\.[^.]+$/, "").trim() || "";
     if (!description) {
       setRunState("error");
       setMessage("つくりたい折り紙を入力するか、画像を追加してください");
@@ -78,34 +156,42 @@ export default function Home() {
 
     setResult(null);
     setRunState("running");
-    setMessage("展開図と3Dを生成中");
+    setMessage("CodexがOrieditaを準備中");
 
     try {
-      // Give the running state a frame of its own so incomplete results never flash.
-      await new Promise((resolve) => window.setTimeout(resolve, 700));
-      const seed = hashString(`${description}:${image?.file.size ?? 0}:${image?.file.lastModified ?? 0}`);
       const analysis = analyzeDescription(description);
+      const seed = hashString(`${description}:${image?.file.size ?? 0}:${image?.file.lastModified ?? 0}`);
       const candidates = generateCandidates({
         description,
         parts: analysis.parts,
         complexity: 4,
         symmetry: true,
         seed,
+      }).map((candidate) => JSON.parse(candidateToFold(candidate, description)));
+      const response = await apiFetch("/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: description,
+          referenceImage: image ? await fileToDataUrl(image.file) : null,
+          fold: candidates[0],
+          candidates,
+          goal: {
+            presetKey: analysis.presetKey,
+            symmetry: true,
+            parts: analysis.parts.map(({ label, importance, direction }) => ({ label, importance, direction })),
+          },
+        }),
       });
-      const candidate = candidates[seed % candidates.length];
-      const creaseImage = svgDataUrl(candidateToSvg(candidate, description));
-
-      setResult({
-        title: description,
-        creaseImage,
-        modelKey: analysis.presetKey,
-        seed,
-      });
+      const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
+      if (!response.ok || !payload.job) throw new Error(payload.error ?? "生成を開始できませんでした");
+      const completed = await waitForJob(payload.job.id, setMessage);
+      setResult(completed);
       setRunState("idle");
       setMessage("生成が完了しました");
-    } catch {
+    } catch (error) {
       setRunState("error");
-      setMessage("生成できませんでした。もう一度お試しください");
+      setMessage(error instanceof Error ? error.message : "生成できませんでした");
     }
   }
 
@@ -121,7 +207,7 @@ export default function Home() {
             {runState === "error"
               ? message
               : runState === "running"
-                ? "展開図と3Dを生成中…"
+                ? "CodexがOrieditaを操作・評価中…"
                 : "つくりたい折り紙を入力"}
           </span>
           <textarea
@@ -136,17 +222,10 @@ export default function Home() {
         </label>
 
         <div className={`uploadField ${image ? "hasImage" : ""}`}>
-          <input
-            id="reference-image"
-            type="file"
-            accept="image/*"
-            onChange={handleImage}
-            disabled={runState === "running"}
-          />
+          <input id="reference-image" type="file" accept="image/*" onChange={handleImage} disabled={runState === "running"} />
           <label htmlFor="reference-image">
             {image ? (
               <>
-                {/* User-selected object URLs cannot be handled by next/image. */}
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img src={image.url} alt="アップロードした参考画像" />
                 <span>{image.name}</span>
@@ -168,9 +247,7 @@ export default function Home() {
                 setImage(null);
                 resetResult();
               }}
-            >
-              ×
-            </button>
+            >×</button>
           )}
         </div>
 
@@ -186,22 +263,23 @@ export default function Home() {
           <article className="outputPanel">
             <div className="outputTitle">
               <h1>展開図</h1>
-              <span>{result.title}</span>
+              <span>CODEX × ORIEDITA</span>
             </div>
             <div className="creaseStage">
-              {/* Generated locally as a standalone SVG data URL. */}
               {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img className="creasePattern" src={result.creaseImage} alt={`${result.title}の展開図`} />
+              <img className="orieditaCrease" src={result.creaseImage} alt="CodexがOrieditaで作成した展開図" />
             </div>
           </article>
 
           <article className="outputPanel">
             <div className="modelTitle">
               <h1>完成形 3D</h1>
-              <span>ドラッグで回転</span>
+              <span>{result.evaluation.iterations} EVALUATIONS</span>
             </div>
             <div className="modelStage">
-              <Origami3D modelKey={result.modelKey} seed={result.seed} />
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img className="foldedModelFallback" src={result.foldedImage} alt="Orieditaの折り上がり結果" />
+              <OrigamiSimulator3D foldFile={result.foldFile} />
             </div>
           </article>
         </section>

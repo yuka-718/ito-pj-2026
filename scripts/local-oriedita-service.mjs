@@ -34,6 +34,14 @@ function launchctl(...args) {
   }
 }
 
+function commandPath(name, fallback) {
+  try {
+    return execFileSync("/usr/bin/which", [name], { encoding: "utf8" }).trim() || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 function xml(value) {
   return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
@@ -63,6 +71,7 @@ const pathValue = [
   "/usr/bin",
   "/bin",
 ].join(":");
+const codex = commandPath("codex", "/opt/homebrew/bin/codex");
 
 const plist = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -87,10 +96,16 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <string>qwen/qwen3.6-27b</string>
     <key>ORI_AI_MAX_ITERATIONS</key>
     <string>10</string>
+    <key>ORI_AI_DESIGN_MODE</key>
+    <string>codex_mcp_loop</string>
+    <key>ORI_AI_CODEX_PATH</key>
+    <string>${xml(codex)}</string>
+    <key>ORI_AI_CODEX_REASONING_EFFORT</key>
+    <string>high</string>
     <key>ORI_AI_TRUST_PROXY</key>
     <string>1</string>
     <key>ORIEDITA_MCP_SERVER</key>
-    <string>${xml(join(runtimeMcp, "server.mjs"))}</string>
+    <string>${xml(join(sourceMcp, "server.mjs"))}</string>
     <key>ORIEDITA_JAR</key>
     <string>${xml(runtimeJar)}</string>
   </dict>

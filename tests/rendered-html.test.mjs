@@ -47,7 +47,7 @@ test("contains the social assets, static output, and no starter preview", async 
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
 
-test("generates without a remote API and makes input errors visible", async () => {
+test("connects to the dynamic Codex and Oriedita API and makes input errors visible", async () => {
   const [page, server, envExample, oracleDeploy] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../local-oriedita/server.mjs", import.meta.url), "utf8"),
@@ -57,7 +57,12 @@ test("generates without a remote API and makes input errors visible", async () =
 
   assert.match(page, /runState === "error"/);
   assert.match(page, /runState === "error" \? "もう一度生成"/);
-  assert.doesNotMatch(page, /fetch\(|apiFetch|waitForJob/);
+  assert.match(page, /resolveApiOrigin/);
+  assert.match(page, /apiFetch\("\/jobs"/);
+  assert.match(page, /waitForJob/);
+  assert.match(page, /\{result && \(\s*<section className="outputs"/);
+  assert.match(server, /codex_mcp_loop/);
+  assert.match(server, /runCodexOrieditaLoop/);
   assert.match(server, /ORI_AI_MAX_JOBS_PER_WINDOW \?\? "0"/);
   assert.match(server, /if \(maxJobsPerWindow === 0\) return;/);
   assert.match(envExample, /^ORI_AI_MAX_JOBS_PER_WINDOW=0$/m);

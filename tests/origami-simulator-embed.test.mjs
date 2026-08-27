@@ -42,15 +42,20 @@ test("application uses a deployment-relative simulator URL and strict replies", 
   assert.doesNotMatch(component, /https:\/\/origamisimulator\.org/);
 });
 
-test("application generates locally and hides both result panels until completion", async () => {
+test("application waits for the Codex and Oriedita job before showing either result panel", async () => {
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.match(page, /candidateToSvg/);
+  assert.match(page, /API_DISCOVERY_URL/);
+  assert.match(page, /raw\.githubusercontent\.com\/yuka-718\/oriai\/runtime\/oriedita-upstream\.json/);
+  assert.match(page, /candidateToFold/);
   assert.match(page, /generateCandidates/);
+  assert.match(page, /apiFetch\("\/jobs"/);
+  assert.match(page, /waitForJob\(payload\.job\.id/);
   assert.match(page, /\{result && \(\s*<section className="outputs"/);
   assert.match(page, /src=\{result\.creaseImage\}/);
-  assert.match(page, /<Origami3D modelKey=\{result\.modelKey\} seed=\{result\.seed\}/);
-  assert.doesNotMatch(page, /fetch\(|apiFetch|waitForJob|OrigamiSimulator3D|ORIEDITA/);
+  assert.match(page, /src=\{result\.foldedImage\}/);
+  assert.match(page, /<OrigamiSimulator3D foldFile=\{result\.foldFile\}/);
+  assert.match(page, /CodexがOrieditaを操作・評価中/);
 });
 
 test("embed removes analytics and exposes only the WebGL canvas", async () => {
