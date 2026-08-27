@@ -160,10 +160,20 @@ export default function Home() {
   const [result, setResult] = useState<OrieditaResult | null>(null);
   const [runState, setRunState] = useState<"idle" | "running" | "error">("idle");
   const [message, setMessage] = useState("");
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
   useEffect(() => () => {
     if (image?.url) URL.revokeObjectURL(image.url);
   }, [image]);
+
+  useEffect(() => {
+    if (runState !== "running") return;
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1_000));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, [runState]);
 
   function resetResult() {
     setResult(null);
@@ -199,6 +209,7 @@ export default function Home() {
     }
 
     setResult(null);
+    setElapsedSeconds(0);
     setRunState("running");
     setMessage("CodexがOrieditaを準備中");
 
@@ -296,7 +307,7 @@ export default function Home() {
         </div>
 
         <button className="generate" type="submit" disabled={runState === "running"}>
-          {runState === "running" ? "生成中…" : runState === "error" ? "もう一度生成" : "生成する"}
+          {runState === "running" ? `生成中… ${elapsedSeconds}秒` : runState === "error" ? "もう一度生成" : "生成する"}
           <span aria-hidden="true">{runState === "running" ? "◇" : "→"}</span>
         </button>
         <p className="srOnly" role="status" aria-live="polite">{message}</p>

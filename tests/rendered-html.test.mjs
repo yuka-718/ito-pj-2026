@@ -57,6 +57,7 @@ test("connects to the dynamic Codex and Oriedita API and makes input errors visi
 
   assert.match(page, /runState === "error"/);
   assert.match(page, /runState === "error" \? "もう一度生成"/);
+  assert.match(page, /生成中… \$\{elapsedSeconds\}秒/);
   assert.match(page, /resolveApiOrigin/);
   assert.match(page, /apiFetch\("\/jobs"/);
   assert.match(page, /waitForJob/);
