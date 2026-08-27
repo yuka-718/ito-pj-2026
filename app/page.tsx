@@ -10,7 +10,7 @@ import {
   hashString,
 } from "./origami-engine";
 
-const API_DISCOVERY_URL = "https://raw.githubusercontent.com/yuka-718/oriai/runtime/oriedita-upstream.json";
+const API_DISCOVERY_URL = "https://api.github.com/repos/yuka-718/oriai/contents/oriedita-upstream.json?ref=runtime";
 const API_RECONNECT_ATTEMPTS = 30;
 const API_RECONNECT_DELAY_MS = 2_000;
 let cachedApiOrigin = "";
@@ -63,7 +63,10 @@ async function resolveApiOrigin(force = false) {
   if (!force && cachedApiOrigin) return cachedApiOrigin;
   const discovery = new URL(API_DISCOVERY_URL);
   discovery.searchParams.set("refresh", String(Date.now()));
-  const response = await fetch(discovery, { cache: "no-store" });
+  const response = await fetch(discovery, {
+    cache: "no-store",
+    headers: { Accept: "application/vnd.github.raw+json" },
+  });
   if (!response.ok) throw new Error("Oriedita実行環境を見つけられませんでした");
   const payload = await response.json() as { url?: unknown };
   if (typeof payload.url !== "string") throw new Error("Oriedita実行環境のURLが不正です");

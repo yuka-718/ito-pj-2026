@@ -46,7 +46,8 @@ test("application waits for the Codex and Oriedita job before showing either res
   const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
   assert.match(page, /API_DISCOVERY_URL/);
-  assert.match(page, /raw\.githubusercontent\.com\/yuka-718\/oriai\/runtime\/oriedita-upstream\.json/);
+  assert.match(page, /api\.github\.com\/repos\/yuka-718\/oriai\/contents\/oriedita-upstream\.json/);
+  assert.match(page, /application\/vnd\.github\.raw\+json/);
   assert.match(page, /candidateToFold/);
   assert.match(page, /generateCandidates/);
   assert.match(page, /apiFetch\("\/jobs"/);
