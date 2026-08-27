@@ -42,20 +42,15 @@ test("application uses a deployment-relative simulator URL and strict replies", 
   assert.doesNotMatch(component, /https:\/\/origamisimulator\.org/);
 });
 
-test("application hides both result panels until the completed job is available", async () => {
-  const [page, component] = await Promise.all([
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/OrigamiSimulator3D.tsx", import.meta.url), "utf8"),
-  ]);
+test("application generates locally and hides both result panels until completion", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
 
-  assert.doesNotMatch(page, /setCandidate|function CreasePattern/);
-  assert.match(page, /\{orieditaResult && \(\s*<section className="outputs"/);
-  assert.doesNotMatch(page, /runState === "done" && orieditaResult/);
-  assert.match(page, /src=\{orieditaResult\.creaseImage\}/);
-  assert.match(page, /<OrigamiSimulator3D foldFile=\{orieditaResult\.foldFile\}/);
-  assert.doesNotMatch(component, /Origami3D/);
-  assert.match(component, /if \(!fold \|\| failed\) return null;/);
-  assert.doesNotMatch(component, /!loaded &&/);
+  assert.match(page, /candidateToSvg/);
+  assert.match(page, /generateCandidates/);
+  assert.match(page, /\{result && \(\s*<section className="outputs"/);
+  assert.match(page, /src=\{result\.creaseImage\}/);
+  assert.match(page, /<Origami3D modelKey=\{result\.modelKey\} seed=\{result\.seed\}/);
+  assert.doesNotMatch(page, /fetch\(|apiFetch|waitForJob|OrigamiSimulator3D|ORIEDITA/);
 });
 
 test("embed removes analytics and exposes only the WebGL canvas", async () => {

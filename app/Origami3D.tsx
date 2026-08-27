@@ -169,13 +169,31 @@ function knowledgeSurfaceMesh(modelKey: string): Face[] {
   return faces;
 }
 
-function getMesh(modelKey: string) {
+function genericMesh(seed: number): Face[] {
+  const faces: Face[] = [];
+  const points = 6 + (seed % 4);
+  const centerTop: Vec3 = [0, 0, .72];
+  const centerBottom: Vec3 = [0, 0, -.38];
+  for (let index = 0; index < points; index += 1) {
+    const angle = (index / points) * Math.PI * 2;
+    const nextAngle = ((index + 1) / points) * Math.PI * 2;
+    const radius = 1.2 + (((seed >>> (index % 16)) & 3) * .18);
+    const nextRadius = 1.2 + (((seed >>> ((index + 1) % 16)) & 3) * .18);
+    const a: Vec3 = [Math.cos(angle) * radius, Math.sin(angle) * radius, index % 2 ? .12 : -.08];
+    const b: Vec3 = [Math.cos(nextAngle) * nextRadius, Math.sin(nextAngle) * nextRadius, index % 2 ? -.08 : .12];
+    faces.push(face(centerTop, a, b, index), face(centerBottom, b, a, index + 2));
+  }
+  return faces;
+}
+
+function getMesh(modelKey: string, seed: number) {
   if (knowledgeFamilies.has(modelKey)) return knowledgeSurfaceMesh(modelKey);
   if (modelKey === "crane") return craneMesh();
   if (modelKey === "beetle") return beetleMesh();
   if (modelKey === "rabbit") return rabbitMesh();
   if (modelKey === "flower") return flowerMesh();
-  return fishMesh();
+  if (modelKey === "goldfish") return fishMesh();
+  return genericMesh(seed);
 }
 
 function shade(hex: string, light: number) {
@@ -187,7 +205,7 @@ function shade(hex: string, light: number) {
   return `rgb(${Math.round(red * factor)}, ${Math.round(green * factor)}, ${Math.round(blue * factor)})`;
 }
 
-export default function Origami3D({ modelKey }: { modelKey: string }) {
+export default function Origami3D({ modelKey, seed = 0 }: { modelKey: string; seed?: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const rotation = useRef({ x: -0.28, y: 0.62 });
   const drag = useRef<{ x: number; y: number } | null>(null);
@@ -223,7 +241,7 @@ export default function Origami3D({ modelKey }: { modelKey: string }) {
         const perspective = 4.6 / (5.8 - z);
         return [width / 2 + x * scale * perspective, height / 2 - y * scale * perspective];
       };
-      const transformed = getMesh(modelKey).map((item) => {
+      const transformed = getMesh(modelKey, seed).map((item) => {
         const points = item.points.map(rotate) as [Vec3, Vec3, Vec3];
         return { ...item, points, depth: points.reduce((sum, point) => sum + point[2], 0) / 3 };
       }).sort((a, b) => a.depth - b.depth);
@@ -268,7 +286,7 @@ export default function Origami3D({ modelKey }: { modelKey: string }) {
       drawRef.current = () => undefined;
       resizeObserver.disconnect();
     };
-  }, [modelKey]);
+  }, [modelKey, seed]);
 
   return (
     <canvas

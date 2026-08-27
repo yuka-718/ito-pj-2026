@@ -27,7 +27,7 @@ test("server-renders the focused origami generator", async () => {
   assert.doesNotMatch(html, /<h1>展開図<\/h1>/);
   assert.doesNotMatch(html, /<h1>完成形 3D<\/h1>/);
   assert.match(html, /生成する/);
-  assert.match(html, /つくりたい形を自由に入力/);
+  assert.match(html, /例：翼を広げた鶴/);
   assert.doesNotMatch(html, /大きな尾びれの金魚/);
   assert.doesNotMatch(html, /origamisimulator\.org/);
   assert.doesNotMatch(html, /WHAT THIS BUILD DOES|HONEST PROTOTYPING|CANDIDATE SCORE/);
@@ -47,7 +47,7 @@ test("contains the social assets, static output, and no starter preview", async 
   assert.doesNotMatch(packageJson, /react-loading-skeleton/);
 });
 
-test("allows unlimited validation runs and makes submission errors visible", async () => {
+test("generates without a remote API and makes input errors visible", async () => {
   const [page, server, envExample, oracleDeploy] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../local-oriedita/server.mjs", import.meta.url), "utf8"),
@@ -55,8 +55,9 @@ test("allows unlimited validation runs and makes submission errors visible", asy
     readFile(new URL("../scripts/deploy-oracle.sh", import.meta.url), "utf8"),
   ]);
 
-  assert.match(page, /runState === "error" \? message : "つくりたい折り紙を入力"/);
+  assert.match(page, /runState === "error"/);
   assert.match(page, /runState === "error" \? "もう一度生成"/);
+  assert.doesNotMatch(page, /fetch\(|apiFetch|waitForJob/);
   assert.match(server, /ORI_AI_MAX_JOBS_PER_WINDOW \?\? "0"/);
   assert.match(server, /if \(maxJobsPerWindow === 0\) return;/);
   assert.match(envExample, /^ORI_AI_MAX_JOBS_PER_WINDOW=0$/m);

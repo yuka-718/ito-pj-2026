@@ -1,7 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
-const publicUrl = "https://yuka-718.github.io/oriai/";
+const publicUrl = "https://ori-ai-ito-pj-2026.pipipiimside.chatgpt.site/";
 
 export const metadata: Metadata = {
   metadataBase: new URL(publicUrl),
