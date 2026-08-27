@@ -10,11 +10,22 @@ import { fileURLToPath } from "node:url";
 
 import {
   loadKnowledgePack,
-  materializeKnowledgePattern,
   publicKnowledgeMatch,
   publicKnowledgeReference,
-  retrieveKnowledge,
+  retrieveStructuralKnowledge,
 } from "./knowledge-search.mjs";
+import {
+  loadOrigamiSearchCatalog,
+  publicOrigamiWorkReference,
+  searchOrigamiWorks,
+  selectOrigamiReferenceImages,
+} from "./origami-search-retriever.mjs";
+import {
+  buildPreliminaryDesignBrief,
+  buildReferenceDocument,
+  chooseValidatedInitialFold,
+  completeDesignBrief,
+} from "./reference-brief.mjs";
 import {
   buildDesignGoal,
   mergeFinalEvaluation,
@@ -43,10 +54,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
 const workRoot = resolve(projectRoot, "work", "local-jobs");
 const knowledgePack = await loadKnowledgePack();
+const origamiSearchCatalog = await loadOrigamiSearchCatalog().catch((error) => {
+  console.warn(`Origami Search索引を読み込めないため参照なしで続行します: ${error instanceof Error ? error.message : error}`);
+  return null;
+});
+const knowledgeSearchEnabled = true;
 const port = Number.parseInt(process.env.ORI_AI_LOCAL_PORT ?? "8788", 10);
 const host = process.env.ORI_AI_LOCAL_HOST ?? "127.0.0.1";
-const maxIterations = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_ITERATIONS ?? "10", 10)));
-const maxCycles = Math.min(10, Math.max(1, Number.parseInt(process.env.ORI_AI_MAX_CYCLES ?? String(maxIterations), 10)));
+const maxIterations = 10;
+const maxCycles = 10;
 const targetScore = Math.min(100, Math.max(1, Number.parseInt(process.env.ORI_AI_TARGET_SCORE ?? "85", 10)));
 const configuredDesignMode = process.env.ORI_AI_DESIGN_MODE?.trim();
 const designMode = configuredDesignMode === "regeneration" || configuredDesignMode === "crease_step_search"
@@ -54,7 +70,6 @@ const designMode = configuredDesignMode === "regeneration" || configuredDesignMo
   : "codex_mcp_loop";
 const stepBranchFactor = Math.min(3, Math.max(1, Number.parseInt(process.env.ORI_AI_STEP_BRANCH_FACTOR ?? "2", 10)));
 const stepBeamWidth = Math.min(2, Math.max(1, Number.parseInt(process.env.ORI_AI_STEP_BEAM_WIDTH ?? "1", 10)));
-const knowledgeSearchEnabled = false;
 const jobTimeoutMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_JOB_TIMEOUT_MS ?? "1200000", 10));
 const rateWindowMs = Math.max(60_000, Number.parseInt(process.env.ORI_AI_RATE_WINDOW_MS ?? "21600000", 10));
 const maxJobsPerWindow = Math.max(0, Number.parseInt(process.env.ORI_AI_MAX_JOBS_PER_WINDOW ?? "0", 10));
@@ -262,50 +277,53 @@ async function createJob(input) {
   if (queue.length >= 3) throw new HttpError(429, "処理待ちが多いため、少し待ってから再実行してください");
   const id = randomUUID();
   const directory = join(workRoot, id);
-  // Search-result substitution is paused until every catalog entry has a
-  // verified crease pattern and matching final 3D state.
-  const knowledgeResults = knowledgeSearchEnabled
-    ? retrieveKnowledge(knowledgePack, input.prompt, { limit: 3 })
-    : [];
-  const exactResult = knowledgeResults.find((match) => match.matchKind === "exact") ?? null;
-  let knowledgeMatch = null;
-  if (exactResult) {
-    try {
-      knowledgeMatch = await materializeKnowledgePattern(exactResult.pattern);
-    } catch (error) {
-      console.warn(`FOLDライブラリの取得に失敗したため生成へ切り替えます: ${error instanceof Error ? error.message : error}`);
-    }
-  }
-  const candidateFolds = knowledgeMatch ? [knowledgeMatch.fold] : input.candidates;
+  const candidateFolds = input.candidates;
   const goal = buildDesignGoal(input.prompt, input.goal);
   const preflight = validateCandidatePool(candidateFolds, goal);
-  const initialFold = candidateFolds[preflight.selectedIndex];
+  const inputFold = candidateFolds[preflight.selectedIndex];
+  const searchWorks = origamiSearchCatalog
+    ? searchOrigamiWorks(origamiSearchCatalog, input.prompt, { minimum: 3, maximum: 5 })
+    : [];
+  const referenceImages = origamiSearchCatalog
+    ? await selectOrigamiReferenceImages(origamiSearchCatalog, searchWorks, {
+      maximum: input.referenceImage ? 7 : 8,
+    })
+    : [];
+  const structuralMatches = retrieveStructuralKnowledge(knowledgePack, input.prompt, { limit: 3 });
+  const workReferences = searchWorks.map(publicOrigamiWorkReference);
+  const knowledgeReferences = structuralMatches.map(publicKnowledgeReference);
+  const references = buildReferenceDocument({
+    prompt: input.prompt,
+    catalog: origamiSearchCatalog,
+    works: workReferences,
+    images: referenceImages,
+    structures: knowledgeReferences,
+  });
+  const designBrief = buildPreliminaryDesignBrief({
+    prompt: input.prompt,
+    goal,
+    works: workReferences,
+    structures: knowledgeReferences,
+  });
+  const fallbackInitialFold = createSquareRootFold(inputFold);
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await mkdir(join(directory, "iterations"), { recursive: true, mode: 0o700 });
   await mkdir(join(directory, "cycles"), { recursive: true, mode: 0o700 });
-  await writeFile(join(directory, "input.fold"), `${JSON.stringify(initialFold, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(directory, "input.fold"), `${JSON.stringify(inputFold, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(directory, "brief.txt"), `${input.prompt || "参考画像をもとに設計"}\n`, { mode: 0o600 });
   await writeFile(join(directory, "goal.json"), `${JSON.stringify(goal, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(directory, "candidate-evaluation.json"), `${JSON.stringify(preflight, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(directory, "references.json"), `${JSON.stringify(references, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(directory, "design-brief.json"), `${JSON.stringify(designBrief, null, 2)}\n`, { mode: 0o600 });
   await Promise.all(candidateFolds.map((candidate, index) =>
     writeFile(join(directory, `candidate-${String(index + 1).padStart(2, "0")}.fold`), `${JSON.stringify(candidate, null, 2)}\n`, { mode: 0o600 })
   ));
-  await Promise.all(preflight.validations.map((validation) =>
-    writeFile(
-      join(directory, "iterations", `${String(validation.index).padStart(2, "0")}-${validation.name}.json`),
-      `${JSON.stringify(validation, null, 2)}\n`,
-      { mode: 0o600 },
-    )
-  ));
-  await writeFile(join(directory, "iterations.json"), `${JSON.stringify(preflight.validations, null, 2)}\n`, { mode: 0o600 });
-
-  const resolvedKnowledgeResults = knowledgeResults.map((match) =>
-    match === exactResult && knowledgeMatch ? { ...match, pattern: knowledgeMatch } : match);
-  const knowledgeReferences = resolvedKnowledgeResults.map(publicKnowledgeReference);
+  await writeFile(join(directory, "preflight-validations.json"), `${JSON.stringify(preflight.validations, null, 2)}\n`, { mode: 0o600 });
+  await writeFile(join(directory, "iterations.json"), "[]\n", { mode: 0o600 });
   await writeFile(join(directory, "knowledge-references.json"), `${JSON.stringify(knowledgeReferences, null, 2)}\n`, { mode: 0o600 });
-  await Promise.all(resolvedKnowledgeResults.filter((match) => match.pattern.fold).map((match, index) =>
+  await Promise.all(structuralMatches.map((match, index) =>
     writeFile(
-      join(directory, `reference-${String(index + 1).padStart(2, "0")}.fold`),
+      join(directory, `structural-candidate-${String(index + 1).padStart(2, "0")}.fold`),
       `${JSON.stringify(match.pattern.fold, null, 2)}\n`,
       { mode: 0o600 },
     )
@@ -316,22 +334,32 @@ async function createJob(input) {
     referencePath = join(directory, `reference${extensionForMimeType(input.referenceImage.mimeType)}`);
     await writeFile(referencePath, input.referenceImage.bytes, { mode: 0o600 });
   }
+  const referencePaths = [
+    ...(referencePath ? [referencePath] : []),
+    ...referenceImages.map(({ local_path }) => local_path),
+  ].slice(0, 8);
 
   const job = {
     id,
     type: "design",
     directory,
     referencePath,
+    referencePaths,
+    referenceImages,
+    references,
+    designBrief,
+    structuralMatches,
+    fallbackInitialFold,
     prompt: input.prompt,
     goal,
     preflight,
     candidateFolds,
-    knowledgeMatch,
+    knowledgeMatch: null,
     knowledgeReferences,
     cycle: 0,
     step: 0,
-    maxCycles: knowledgeMatch ? 1 : maxCycles,
-    maxSteps: knowledgeMatch ? 1 : maxCycles,
+    maxCycles,
+    maxSteps: maxCycles,
     evaluatedNodes: 0,
     designMode,
     bestScore: null,
@@ -1214,20 +1242,84 @@ async function runStepDesignLoop(job) {
   return finalizeStepSearchResult(job, search);
 }
 
+async function prepareCodexInitialFold(job) {
+  const validations = [];
+  for (let index = 0; index < job.structuralMatches.length; index += 1) {
+    const match = job.structuralMatches[index];
+    const candidatePath = join(job.directory, `structural-candidate-${String(index + 1).padStart(2, "0")}.fold`);
+    const record = {
+      pattern_id: match.pattern.id,
+      family: match.pattern.family,
+      status: "failed",
+      oriedita_completed: false,
+      violation_count: null,
+      reason: "Oriedita検証を完了できませんでした",
+    };
+    try {
+      await orieditaRequest("/open", {
+        method: "POST",
+        body: JSON.stringify({ path: candidatePath }),
+      });
+      const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
+      record.violation_count = Number(calculation?.violationCount ?? 0);
+      if (!calculation?.started || record.violation_count > 0) {
+        record.reason = calculation?.started
+          ? `局所平坦折り違反 ${record.violation_count}件`
+          : "Orieditaが平坦折り計算を開始できませんでした";
+      } else {
+        const state = await waitForFold(30_000);
+        record.oriedita_completed = state?.foldedFigures?.completed === true;
+        record.status = record.oriedita_completed ? "passed" : "failed";
+        record.reason = record.oriedita_completed
+          ? "Orieditaの2D平坦折り計算が完了"
+          : "Orieditaの2D平坦折り計算が完了しませんでした";
+      }
+    } catch (error) {
+      record.reason = error instanceof Error ? error.message : String(error);
+    }
+    validations.push(record);
+  }
+  const selected = chooseValidatedInitialFold(job.structuralMatches, validations, job.fallbackInitialFold);
+  if (!selected.fold) throw new Error("初期FOLDを準備できませんでした");
+  const initialPath = join(job.directory, "initial.fold");
+  await writeFile(initialPath, `${JSON.stringify(selected.fold, null, 2)}\n`, { mode: 0o600 });
+  const structuralCandidates = job.references.structural_knowledge.candidates.map((candidate) => ({
+    ...candidate,
+    validation: validations.find(({ pattern_id: patternId }) => patternId === candidate.id) ?? null,
+  }));
+  job.references = {
+    ...job.references,
+    structural_knowledge: {
+      ...job.references.structural_knowledge,
+      candidates: structuralCandidates,
+      selected_initial: {
+        source: selected.source,
+        pattern_id: selected.pattern_id,
+        fallback: selected.fallback,
+      },
+    },
+  };
+  await Promise.all([
+    writeFile(join(job.directory, "references.json"), `${JSON.stringify(job.references, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(job.directory, "structural-validation.json"), `${JSON.stringify(validations, null, 2)}\n`, { mode: 0o600 }),
+  ]);
+  return initialPath;
+}
+
 async function runCodexDesignLoop(job) {
-  const rootPath = join(job.directory, "codex-root.fold");
+  const initialFoldPath = await prepareCodexInitialFold(job);
   const finalFoldPath = join(job.directory, "final.fold");
   const finalCreasePath = join(job.directory, "final-crease.png");
-  const source = job.candidateFolds[job.preflight.selectedIndex];
-  await writeFile(rootPath, `${JSON.stringify(createSquareRootFold(source), null, 2)}\n`, { mode: 0o600 });
   const codexEvaluation = await runCodexOrieditaLoop({
     directory: job.directory,
     prompt: job.prompt,
     goal: job.goal,
-    rootPath,
+    initialFoldPath,
     finalFoldPath,
     finalCreasePath,
-    referencePath: job.referencePath,
+    referencePaths: job.referencePaths,
+    referenceData: job.references,
+    designBrief: job.designBrief,
     maximumIterations: job.maxSteps,
     timeoutMs: jobTimeoutMs,
     onProgress: (step) => {
@@ -1236,6 +1328,28 @@ async function runCodexDesignLoop(job) {
       job.message = `CodexがOrieditaを操作・画像評価 ${step}/${job.maxSteps}`;
     },
   });
+
+  const completedBrief = completeDesignBrief(job.designBrief, codexEvaluation.design_brief);
+  const iterationRecords = codexEvaluation.steps.map((step) => ({
+    schema: "oriai-codex-oriedita-iteration-v1",
+    ...step,
+    required_operation: {
+      add_line: 1,
+      calculate_fold: 1,
+      get_folded_figure: 1,
+      rollback_when_worse: step.accepted !== true,
+    },
+  }));
+  await Promise.all([
+    writeFile(join(job.directory, "design-brief.json"), `${JSON.stringify(completedBrief, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(job.directory, "iterations.json"), `${JSON.stringify(iterationRecords, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(job.directory, "operation-summary.json"), `${JSON.stringify(codexEvaluation.operation_counts, null, 2)}\n`, { mode: 0o600 }),
+    ...iterationRecords.map((record) => writeFile(
+      join(job.directory, "iterations", `${String(record.step).padStart(2, "0")}-codex-oriedita.json`),
+      `${JSON.stringify(record, null, 2)}\n`,
+      { mode: 0o600 },
+    )),
+  ]);
 
   await access(finalFoldPath);
   await orieditaRequest("/open", {
@@ -1443,6 +1557,13 @@ async function handle(request, response) {
         designMode,
         stepSearch: { maxSteps: maxCycles, branchFactor: stepBranchFactor, beamWidth: stepBeamWidth },
         knowledgeSearch: knowledgeSearchEnabled,
+        rag: {
+          mode: "generation_time_retrieval",
+          origamiSearchWorks: origamiSearchCatalog?.index?.item_count ?? 0,
+          structuralPatterns: knowledgePack.patternCount,
+          referenceImageMaximum: 8,
+          finishedWorkSubstitution: false,
+        },
         evaluator: designMode === "codex_mcp_loop"
           ? { provider: "codex", model: "Codex CLI", configured: true }
           : { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
@@ -1465,6 +1586,13 @@ async function handle(request, response) {
         designMode,
         stepSearch: { maxSteps: maxCycles, branchFactor: stepBranchFactor, beamWidth: stepBeamWidth },
         knowledgeSearch: knowledgeSearchEnabled,
+        rag: {
+          mode: "generation_time_retrieval",
+          origamiSearchWorks: origamiSearchCatalog?.index?.item_count ?? 0,
+          structuralPatterns: knowledgePack.patternCount,
+          referenceImageMaximum: 8,
+          finishedWorkSubstitution: false,
+        },
         evaluator: designMode === "codex_mcp_loop"
           ? { provider: "codex", model: "Codex CLI", configured: true }
           : { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },

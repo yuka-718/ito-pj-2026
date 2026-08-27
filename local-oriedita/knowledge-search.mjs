@@ -20,6 +20,10 @@ const FAMILY_ALIASES = [
   { family: "triangular_lattice", aliases: ["triangular lattice", "triangle lattice", "三角格子"] },
   { family: "waterbomb_tessellation", aliases: ["waterbomb", "water bomb", "ウォーターボム", "水爆折り", "水爆"] },
   { family: "reference_precrease", aliases: ["reference precrease", "precrease", "プリクリーズ", "基準折り"] },
+  { family: "boundary_fan_pleats", aliases: ["boundary fan", "fan pleat", "境界ファン", "ファンプリーツ", "扇ひだ"] },
+  { family: "herringbone_corrugation", aliases: ["herringbone", "ヘリンボーン", "杉綾"] },
+  { family: "nonuniform_orthogonal_grid", aliases: ["nonuniform orthogonal grid", "nonuniform grid", "不均一直交格子", "不均一格子"] },
+  { family: "concentric_polygon_rings", aliases: ["concentric polygon", "polygon rings", "同心多角形", "多角形リング"] },
 ];
 
 const MOTIF_PROFILES = [
@@ -215,7 +219,10 @@ function numericConstraints(query, family) {
   };
   const result = {};
   const dimensions = query.match(/(\d+)\s*[×xX＊*]\s*(\d+)/);
-  if (dimensions && ["miura_like", "yoshimura_like", "square_twist_array", "triangular_lattice", "waterbomb_tessellation"].includes(family)) {
+  if (dimensions && [
+    "miura_like", "yoshimura_like", "square_twist_array", "triangular_lattice", "waterbomb_tessellation",
+    "herringbone_corrugation", "nonuniform_orthogonal_grid",
+  ].includes(family)) {
     result.rows = Number.parseInt(dimensions[1], 10);
     result.cols = Number.parseInt(dimensions[2], 10);
   }
@@ -229,6 +236,11 @@ function numericConstraints(query, family) {
     accordion_pleats: [["count", [/蛇腹\s*(\d+)/, /(\d+)\s*本/, /count\s*(\d+)/i]]],
     kresling_like: [
       ["sectors", [/角\s*(\d+)/, /(\d+)\s*角/, /sectors?\s*(\d+)/i]],
+      ["levels", [/(\d+)\s*層/, /層\s*(\d+)/, /levels?\s*(\d+)/i]],
+    ],
+    boundary_fan_pleats: [["rays", [/(\d+)\s*本/, /放射\s*(\d+)/, /rays?\s*(\d+)/i]]],
+    concentric_polygon_rings: [
+      ["sides", [/(\d+)\s*角/, /辺数\s*(\d+)/, /sides?\s*(\d+)/i]],
       ["levels", [/(\d+)\s*層/, /層\s*(\d+)/, /levels?\s*(\d+)/i]],
     ],
   };
@@ -344,6 +356,48 @@ export function retrieveKnowledge(pack, query, { limit = 3 } = {}) {
   }));
 }
 
+export function retrieveStructuralKnowledge(pack, query, { limit = 3 } = {}) {
+  const normalizedQuery = normalize(query ?? "");
+  if (!normalizedQuery) return [];
+  const maximum = Math.max(1, Math.min(3, Math.floor(Number(limit) || 3)));
+  const family = explicitFamily(normalizedQuery);
+  const profile = motifProfile(normalizedQuery);
+  const preferredFamilySpec = profile && family
+    ? profile.references.find((reference) => reference.family === family)
+    : null;
+  const specs = profile
+    ? family
+      ? [{
+        family,
+        params: { ...(preferredFamilySpec?.params ?? {}), ...numericConstraints(normalizedQuery, family) },
+      }, ...profile.references]
+      : profile.references
+    : family
+      ? [{ family, params: numericConstraints(normalizedQuery, family) }]
+      : [];
+  const seenFamilies = new Set();
+  const seenIds = new Set();
+  const results = [];
+  for (const spec of specs) {
+    const pattern = resolveReference(pack, spec, normalizedQuery);
+    if (!pattern?.fold || pattern.is_finished_model === true || seenIds.has(pattern.id) || seenFamilies.has(pattern.family)) continue;
+    seenIds.add(pattern.id);
+    seenFamilies.add(pattern.family);
+    const score = Math.max(1, 100 - results.length * 12);
+    results.push({
+      pattern,
+      matchKind: "structural_reference",
+      profile: profile?.key ?? null,
+      reason: profile
+        ? `${profile.key}の基本形・部位配置・面積配分を考えるための${pattern.family}構造`
+        : `指定された${pattern.family}構造の初期候補`,
+      score,
+    });
+    if (results.length >= maximum) break;
+  }
+  return results;
+}
+
 export function searchKnowledge(pack, query) {
   const match = retrieveKnowledge(pack, query, { limit: 1 })[0];
   return match?.matchKind === "exact" ? match.pattern : null;
@@ -374,6 +428,7 @@ export function publicKnowledgeReference(match) {
     matchKind: match.matchKind,
     profile: match.profile,
     reason: match.reason,
+    score: match.score ?? null,
   });
 }
 

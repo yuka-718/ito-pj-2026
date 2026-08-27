@@ -12,9 +12,38 @@
       "items": { "type": "string" },
       "maxItems": 8
     },
+    "design_brief": {
+      "type": "object",
+      "properties": {
+        "folding_approach": { "type": "string" },
+        "basic_form": { "type": "string" },
+        "features": {
+          "type": "array",
+          "items": { "type": "string" },
+          "maxItems": 12
+        },
+        "area_allocation": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "object",
+            "properties": {
+              "part": { "type": "string" },
+              "percent": { "type": "integer", "minimum": 0, "maximum": 100 }
+            },
+            "required": ["part", "percent"],
+            "additionalProperties": false
+          }
+        },
+        "symmetry": { "type": "string" },
+        "source_use": { "type": "string" }
+      },
+      "required": ["folding_approach", "basic_form", "features", "area_allocation", "symmetry", "source_use"],
+      "additionalProperties": false
+    },
     "steps": {
       "type": "array",
-      "minItems": 1,
+      "minItems": 10,
       "maxItems": 10,
       "items": {
         "type": "object",
@@ -22,6 +51,10 @@
           "step": { "type": "integer", "minimum": 1, "maximum": 10 },
           "score": { "type": "integer", "minimum": 0, "maximum": 100 },
           "accepted": { "type": "boolean" },
+          "fold_calculation_started": { "type": "boolean" },
+          "fold_completed": { "type": "boolean" },
+          "violation_count": { "type": "integer", "minimum": 0 },
+          "image_reviewed": { "type": "boolean" },
           "action": { "type": "string" },
           "summary": { "type": "string" },
           "issues": {
@@ -30,11 +63,11 @@
             "maxItems": 6
           }
         },
-        "required": ["step", "score", "accepted", "action", "summary", "issues"],
+        "required": ["step", "score", "accepted", "fold_calculation_started", "fold_completed", "violation_count", "image_reviewed", "action", "summary", "issues"],
         "additionalProperties": false
       }
     }
   },
-  "required": ["score", "iterations", "best_step", "stop_reason", "summary", "issues", "steps"],
+  "required": ["score", "iterations", "best_step", "stop_reason", "summary", "issues", "design_brief", "steps"],
   "additionalProperties": false
 }

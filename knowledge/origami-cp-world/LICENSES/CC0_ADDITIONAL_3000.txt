@@ -1,0 +1,7 @@
+CC0 1.0 dedication for the generated corpus
+
+To the extent possible under law, the creator of the files under corpus/generated_cc0 has waived all copyright and related or neighboring rights worldwide under CC0 1.0 Universal.
+
+Canonical deed and legal code: https://creativecommons.org/publicdomain/zero/1.0/
+
+This dedication applies only to the generated files and their local metadata. It does not apply to third-party files fetched later by the collector.

@@ -5,20 +5,50 @@ import {
   loadKnowledgePack,
   materializeKnowledgePattern,
   retrieveKnowledge,
+  retrieveStructuralKnowledge,
   searchKnowledge,
 } from "../local-oriedita/knowledge-search.mjs";
 
 const pack = await loadKnowledgePack();
 
 test("loads the bundled CC0 origami knowledge pack", () => {
-  assert.equal(pack.patternCount, 2157);
-  assert.equal(pack.patterns.length, 2157);
+  assert.equal(pack.patternCount, 5157);
+  assert.equal(pack.patterns.length, 5157);
   assert.equal(pack.finishedModelCount, 486);
   assert.equal(pack.finishedModels.length, 486);
   assert.equal(pack.finishedModelSources.length, 6);
   assert.equal(
     pack.patterns.some(({ fold }) => Object.keys(fold).some((key) => key.startsWith("metadata_"))),
     false,
+  );
+});
+
+test("retrieves structural priors without treating them as finished works", () => {
+  for (const prompt of ["鶴", "うさぎ", "金魚", "カブトムシ"]) {
+    const matches = retrieveStructuralKnowledge(pack, prompt);
+    assert.ok(matches.length >= 1 && matches.length <= 3);
+    assert.equal(matches.every(({ matchKind }) => matchKind === "structural_reference"), true);
+    assert.equal(matches.every(({ pattern }) => pattern.is_finished_model !== true), true);
+    assert.equal(matches.every(({ pattern }) => pattern.fold && pattern.frame_classes?.[0] !== "foldedForm"), true);
+  }
+  assert.deepEqual(retrieveStructuralKnowledge(pack, "存在しない架空モチーフxyzxyz"), []);
+});
+
+test("loads the additional CC0 structural corpus without treating it as finished models", () => {
+  const additional = pack.patterns.filter(({ source }) => source === "Origami Search Additional 3000 2026-08-27");
+  assert.equal(additional.length, 3000);
+  assert.equal(additional.every(({ human_verified }) => human_verified === false), true);
+  assert.equal(additional.every(({ is_finished_model }) => is_finished_model === false), true);
+  assert.equal(additional.every(({ activation_sequence }) => activation_sequence?.human_verified === false), true);
+  assert.equal(searchKnowledge(pack, "次数22の単頂点")?.params.degree, 22);
+  assert.equal(searchKnowledge(pack, "アコーディオン30本")?.params.count, 30);
+  assert.equal(searchKnowledge(pack, "32本のファンプリーツ")?.params.rays, 32);
+  assert.deepEqual(
+    {
+      rows: searchKnowledge(pack, "13×18のヘリンボーン")?.params.rows,
+      cols: searchKnowledge(pack, "13×18のヘリンボーン")?.params.cols,
+    },
+    { rows: 13, cols: 18 },
   );
 });
 

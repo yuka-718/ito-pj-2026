@@ -40,3 +40,8 @@ yarn-error.log*
 /.wrangler/
 /outputs/
 /work/
+/knowledge/origami-search-training/cache/
+/knowledge/origami-search-training/runs/*
+!/knowledge/origami-search-training/runs/current/
+/knowledge/origami-search-training/runs/current/*
+!/knowledge/origami-search-training/runs/current/index.json

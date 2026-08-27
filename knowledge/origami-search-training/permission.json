@@ -1,0 +1,7 @@
+{
+  "status": "user_confirmed",
+  "confirmed_at": "2026-08-27",
+  "statement": "作者さんから許可あります",
+  "source": "https://origami-search.i1013235329.workers.dev/",
+  "note": "実運用前に、許可がAI入力・学習・変換データの保存・生成物の公開まで含む証跡をこのディレクトリで保管する。"
+}

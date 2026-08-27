@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["item_id", "title", "completeness", "source_coordinate_system", "crease_pattern", "steps", "issues"],
+  "properties": {
+    "item_id": { "type": "string" },
+    "title": { "type": "string" },
+    "completeness": { "type": "string", "enum": ["complete", "partial", "unusable"] },
+    "source_coordinate_system": { "type": "string", "enum": ["original_square", "folded_state", "unknown"] },
+    "crease_pattern": {
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["present", "creases", "confidence"],
+          "properties": {
+            "present": { "type": "boolean" },
+            "creases": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["a", "b", "assignment", "confidence"],
+                "properties": {
+                  "a": { "$ref": "#/$defs/point" },
+                  "b": { "$ref": "#/$defs/point" },
+                  "assignment": { "type": "string", "enum": ["M", "V", "U"] },
+                  "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+                }
+              }
+            },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      ]
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["step_number", "instruction", "fold_type", "crease", "confidence"],
+        "properties": {
+          "step_number": { "type": "integer", "minimum": 1 },
+          "instruction": { "type": "string" },
+          "fold_type": { "type": "string", "enum": ["mountain", "valley", "unfold", "reverse", "sink", "rotate", "shape", "other"] },
+          "crease": {
+            "anyOf": [
+              { "type": "null" },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["a", "b", "coordinate_system"],
+                "properties": {
+                  "a": { "$ref": "#/$defs/point" },
+                  "b": { "$ref": "#/$defs/point" },
+                  "coordinate_system": { "type": "string", "enum": ["original_square", "folded_state", "unknown"] }
+                }
+              }
+            ]
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "issues": { "type": "array", "items": { "type": "string" } }
+  },
+  "$defs": {
+    "point": {
+      "type": "array",
+      "items": { "type": "number", "minimum": 0, "maximum": 1 },
+      "minItems": 2,
+      "maxItems": 2
+    }
+  }
+}
