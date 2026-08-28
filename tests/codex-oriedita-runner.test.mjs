@@ -7,13 +7,16 @@ import test from "node:test";
 import {
   assertAllowedOrieditaPaths,
   assertCodexDecisionEvidence,
+  assertNovelCodexActionKeys,
   assertCodexOperationSnapshot,
   assertInitialCreasesPreserved,
   assertSuccessfulStepEvaluations,
   buildCodexLoopPrompt,
+  codexActionKey,
   codexChildEnvironment,
   createSecureOrieditaStaging,
   createCodexOperationTracker,
+  deriveVerifiedCodexBatchOutcome,
   mergeActualToolResults,
   normalizeCodexLoopResult,
   normalizeReferencePaths,
@@ -41,8 +44,43 @@ function mcpEvent(tool, {
   });
 }
 
+function ingestVerifiedAdd(tracker, index, override = {}, reportedLine = null) {
+  const line = {
+    ax: -200,
+    ay: -180 + index * 20,
+    bx: 200,
+    by: -180 + index * 20,
+    color: index % 2 === 0 ? "MOUNTAIN" : "VALLEY",
+    ...override,
+  };
+  const edge = { a: { x: -200, y: -200 }, b: { x: 200, y: -200 }, color: "EDGE" };
+  tracker.ingestLine(mcpEvent("get_crease_pattern", {
+    result: { structured_content: { lineCount: 1, lines: [edge] } },
+  }));
+  tracker.ingestLine(mcpEvent("add_line", {
+    arguments: line,
+    result: {
+      structured_content: {
+        line: reportedLine ?? { a: { x: line.ax, y: line.ay }, b: { x: line.bx, y: line.by }, color: line.color },
+        lineCount: 2,
+      },
+    },
+  }));
+  tracker.ingestLine(mcpEvent("get_crease_pattern", {
+    result: {
+      structured_content: {
+        lineCount: 2,
+        lines: [
+          edge,
+          { a: { x: line.ax, y: line.ay }, b: { x: line.bx, y: line.by }, color: line.color },
+        ],
+      },
+    },
+  }));
+}
+
 function ingestSuccessfulIteration(tracker, index) {
-  tracker.ingestLine(mcpEvent("add_line", { arguments: { y: index } }));
+  ingestVerifiedAdd(tracker, index);
   tracker.ingestLine(mcpEvent("calculate_fold", {
     result: { structured_content: { started: true, violationCount: 0 } },
   }));
@@ -90,6 +128,10 @@ test("Codex loop prompt requires one crease, fold calculation, image review when
     finalFoldPath: "/tmp/job/final.fold",
     finalCreasePath: "/tmp/job/final.png",
     maximumIterations: 10,
+    startingBestScore: 74,
+    iterationOffset: 20,
+    targetScore: 99,
+    priorAttemptsSummary: { tried: ["horizontal center"] },
   });
 
   assert.match(prompt, /候補の追加と評価をちょうど10回/);
@@ -107,6 +149,14 @@ test("Codex loop prompt requires one crease, fold calculation, image review when
   assert.match(prompt, /既存線と交差しない平行線だけ/);
   assert.match(prompt, /最高点を厳密に上回った候補だけ/);
   assert.match(prompt, /同点または悪化した候補は必ず accepted=false/);
+  assert.match(prompt, /バッチ開始時の実証済み最高点: 74/);
+  assert.match(prompt, /今回の通算評価番号: 21〜30/);
+  assert.match(prompt, /表示可能になる目標点: 99/);
+  assert.match(prompt, /以前の試行要約/);
+  assert.match(prompt, /毎回現在CPを読み、未使用の候補を選ぶ/);
+  assert.match(prompt, /add_lineの直後、calculate_foldより前にもう一度 get_crease_pattern/);
+  assert.match(prompt, /全線内容が追加前から実際に変化/);
+  assert.doesNotMatch(prompt, /y=-180/);
   assert.match(prompt, /最初のツール呼び出しは必ず oriedita\.get_status/);
   assert.match(prompt, /list_mcp_resources、list_mcp_resource_templates、read_mcp_resource.*呼んではいけません/);
   assert.match(prompt, /リソース一覧が空でもOrieditaツールが利用できないとは判断しない/);
@@ -157,6 +207,58 @@ test("normalization preserves exactly ten evaluations and clamps scores", () => 
   assert.equal(result.steps[0].image_reviewed, true);
   assert.equal(result.design_brief.basic_form, "bird base reference");
   assert.deepEqual(result.steps.map(({ step }) => step), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+});
+
+test("verified batch outcome ignores the model overall score and keeps global best-step evidence", () => {
+  const source = resultWithSteps(3);
+  source.score = 100;
+  source.best_step = 1;
+  source.steps[0].score = 82;
+  source.steps[1].score = 84;
+  source.steps[2].score = 83;
+  const normalized = normalizeCodexLoopResult(source, 3);
+  const outcome = deriveVerifiedCodexBatchOutcome(normalized.steps, [false, true, false], {
+    startingBestScore: 80,
+    iterationOffset: 20,
+    targetScore: 99,
+  });
+  assert.deepEqual(outcome, {
+    score: 84,
+    best_step: 22,
+    target_score: 99,
+    target_reached: false,
+    stop_reason: "completed_iteration_batch",
+  });
+});
+
+test("verified batch outcome reports the target only from an evidenced accepted step", () => {
+  const steps = [{ score: 100 }, { score: 99 }];
+  assert.deepEqual(deriveVerifiedCodexBatchOutcome(steps, [false, true], {
+    startingBestScore: 98,
+    iterationOffset: 30,
+  }), {
+    score: 99,
+    best_step: 32,
+    target_score: 99,
+    target_reached: true,
+    stop_reason: "target_score_reached",
+  });
+});
+
+test("verified batch outcome retains the prior global score when this batch has no accepted improvement", () => {
+  assert.deepEqual(deriveVerifiedCodexBatchOutcome([
+    { score: 100 },
+    { score: 97 },
+  ], [false, false], {
+    startingBestScore: 98,
+    iterationOffset: 40,
+  }), {
+    score: 98,
+    best_step: 0,
+    target_score: 99,
+    target_reached: false,
+    stop_reason: "completed_iteration_batch",
+  });
 });
 
 test("successful evaluation requires a real completed fold and image for every step", () => {
@@ -229,6 +331,7 @@ test("JSONL tracker accepts exactly ten factual iteration triplets and permits f
     finalCreasePath: "/tmp/job/final-crease.png",
   }));
   assert.deepEqual(snapshot.counts, {
+    get_crease_pattern: 20,
     add_line: 10,
     calculate_fold: 11,
     get_folded_figure: 11,
@@ -240,18 +343,146 @@ test("JSONL tracker accepts exactly ten factual iteration triplets and permits f
   assert.equal(snapshot.iterations[0].calculate_fold.started, true);
   assert.equal(snapshot.iterations[0].calculate_fold.violation_count, 0);
   assert.equal(snapshot.iterations[0].get_folded_figure.image_present, true);
+  assert.equal(snapshot.iterations[0].crease_pattern_after.changed, true);
+  assert.equal(snapshot.iterations[0].add_line.response_matches_request, true);
+  assert.equal(snapshot.action_keys.length, 10);
+});
+
+test("crease action identity is endpoint-direction independent and quantized", () => {
+  const forward = {
+    ax: -200,
+    ay: 12.3456784,
+    bx: 200,
+    by: 12.3456784,
+    color: "MOUNTAIN",
+  };
+  const reversedWithNoise = {
+    ax: 200,
+    ay: 12.34567839,
+    bx: -200,
+    by: 12.34567839,
+    color: "MOUNTAIN",
+  };
+  assert.equal(codexActionKey(forward), codexActionKey(reversedWithNoise));
+  assert.equal(codexActionKey({ ...forward, color: "EDGE" }), null);
+  assert.equal(codexActionKey({ ...forward, bx: forward.ax, by: forward.ay }), null);
+});
+
+test("JSONL tracker fails closed when add_line does not change the full CP hash", () => {
+  const tracker = createCodexOperationTracker({ maximumIterations: 1 });
+  const edge = { a: { x: -200, y: -200 }, b: { x: 200, y: -200 }, color: "EDGE" };
+  const line = { ax: -200, ay: 0, bx: 200, by: 0, color: "MOUNTAIN" };
+  tracker.ingestLine(mcpEvent("get_crease_pattern", {
+    result: { structured_content: { lineCount: 1, lines: [edge] } },
+  }));
+  tracker.ingestLine(mcpEvent("add_line", {
+    arguments: line,
+    result: {
+      structured_content: {
+        line: { a: { x: line.ax, y: line.ay }, b: { x: line.bx, y: line.by }, color: line.color },
+        lineCount: 1,
+      },
+    },
+  }));
+  tracker.ingestLine(mcpEvent("get_crease_pattern", {
+    result: { structured_content: { lineCount: 1, lines: [edge] } },
+  }));
+  tracker.ingestLine(mcpEvent("calculate_fold", {
+    result: { structured_content: { started: true, violationCount: 0 } },
+  }));
+  tracker.ingestLine(mcpEvent("get_folded_figure", {
+    result: { content: [{ type: "image", data: "png", mimeType: "image/png" }] },
+  }));
+
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.iterations[0].crease_pattern_after.changed, false);
+  assert.equal(snapshot.completed_iterations, 0);
+  assert.throws(() => assertCodexOperationSnapshot(snapshot, 1), /失敗 step: 1/);
+});
+
+test("action callbacks persist an inflight key before recording verified CP-change evidence", async () => {
+  const records = [];
+  const tracker = createCodexOperationTracker({
+    maximumIterations: 1,
+    onActionAttempt: async (record) => records.push({ ...record }),
+    onActionEvidence: async (record) => records.push({ ...record }),
+  });
+  ingestVerifiedAdd(tracker, 0);
+  await tracker.flushActionEvidence();
+
+  assert.equal(records.length, 2);
+  assert.equal(records[0].phase, "inflight");
+  assert.equal(records[1].phase, "evidenced");
+  assert.equal(records[0].action_key, records[1].action_key);
+  assert.equal(records[1].line_count_before, 1);
+  assert.equal(records[1].line_count_after, 2);
+  assert.notEqual(records[1].crease_hash_before, records[1].crease_hash_after);
+});
+
+test("action evidence persistence errors fail closed when the tracker is flushed", async () => {
+  const tracker = createCodexOperationTracker({
+    maximumIterations: 1,
+    onActionAttempt: async () => {
+      throw new Error("wal fsync failed");
+    },
+  });
+  ingestVerifiedAdd(tracker, 0);
+  await assert.rejects(tracker.flushActionEvidence(), /wal fsync failed/);
+});
+
+test("JSONL tracker rejects an add_line response that does not match requested geometry", () => {
+  const tracker = createCodexOperationTracker({ maximumIterations: 1 });
+  ingestVerifiedAdd(tracker, 0, {}, {
+    a: { x: -200, y: 1 },
+    b: { x: 200, y: 1 },
+    color: "VALLEY",
+  });
+  tracker.ingestLine(mcpEvent("calculate_fold", {
+    result: { structured_content: { started: true, violationCount: 0 } },
+  }));
+  tracker.ingestLine(mcpEvent("get_folded_figure", {
+    result: { content: [{ type: "image", data: "png", mimeType: "image/png" }] },
+  }));
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.iterations[0].add_line.response_matches_request, false);
+  assert.throws(() => assertCodexOperationSnapshot(snapshot, 1), /失敗 step: 1/);
+});
+
+test("all-history action keys reject reversed duplicates outside the retained 80 attempts", () => {
+  const first = codexActionKey({ ax: -200, ay: 40, bx: 200, by: 40, color: "VALLEY" });
+  const reversed = codexActionKey({ ax: 200, ay: 40, bx: -200, by: 40, color: "VALLEY" });
+  assert.equal(first, reversed);
+  assert.throws(
+    () => assertNovelCodexActionKeys([reversed], {
+      previousActionKeys: new Set([first]),
+      expectedCount: 1,
+    }),
+    /過去試行と重複/,
+  );
+
+  const tracker = createCodexOperationTracker({ maximumIterations: 1, previousActionKeys: [first] });
+  ingestVerifiedAdd(tracker, 0, { ax: 200, ay: 40, bx: -200, by: 40, color: "VALLEY" });
+  tracker.ingestLine(mcpEvent("calculate_fold", {
+    result: { structured_content: { started: true, violationCount: 0 } },
+  }));
+  tracker.ingestLine(mcpEvent("get_folded_figure", {
+    result: { content: [{ type: "image", data: "png", mimeType: "image/png" }] },
+  }));
+  const snapshot = tracker.snapshot();
+  assert.equal(snapshot.iterations[0].add_line.duplicate_previous, true);
+  assert.throws(() => assertCodexOperationSnapshot(snapshot, 1), /失敗 step: 1/);
 });
 
 test("JSONL factual results override a model's success claims", () => {
   const tracker = createCodexOperationTracker({ maximumIterations: 2 });
-  tracker.ingestLine(mcpEvent("add_line"));
+  ingestVerifiedAdd(tracker, 0);
   tracker.ingestLine(mcpEvent("calculate_fold", {
     result: { structured_content: { started: false, violationCount: 1 } },
   }));
   tracker.ingestLine(mcpEvent("get_folded_figure", {
     result: { content: [{ type: "image", data: "png", mimeType: "image/png" }] },
   }));
-  tracker.ingestLine(mcpEvent("add_line"));
+  ingestVerifiedAdd(tracker, 1);
   tracker.ingestLine(mcpEvent("calculate_fold", {
     result: { structured_content: { started: true, violationCount: 0 } },
   }));
@@ -273,7 +504,7 @@ test("JSONL factual results override a model's success claims", () => {
 test("JSONL tracker rejects a missing or non-numeric violation count", () => {
   for (const violationCount of [undefined, null, "0", Number.NaN, -1, 0.5]) {
     const tracker = createCodexOperationTracker({ maximumIterations: 1 });
-    tracker.ingestLine(mcpEvent("add_line"));
+    ingestVerifiedAdd(tracker, 0);
     tracker.ingestLine(mcpEvent("calculate_fold", {
       result: { structured_content: { started: true, violationCount } },
     }));
@@ -302,7 +533,7 @@ test("JSONL tracker rejects an eleventh add_line and disallowed local paths", ()
 
 test("JSONL tracker accepts a later folded-figure retry with an actual image", () => {
   const tracker = createCodexOperationTracker({ maximumIterations: 1 });
-  tracker.ingestLine(mcpEvent("add_line"));
+  ingestVerifiedAdd(tracker, 0);
   tracker.ingestLine(mcpEvent("calculate_fold", {
     result: { structured_content: { started: true, violationCount: 0 } },
   }));
@@ -323,7 +554,7 @@ test("JSONL tracker accepts a later folded-figure retry with an actual image", (
 
 test("JSONL tracker never attributes an image obtained after a rollback to the rejected candidate", () => {
   const tracker = createCodexOperationTracker({ maximumIterations: 1 });
-  tracker.ingestLine(mcpEvent("add_line"));
+  ingestVerifiedAdd(tracker, 0);
   tracker.ingestLine(mcpEvent("calculate_fold", {
     result: { structured_content: { started: true, violationCount: 0 } },
   }));
@@ -414,6 +645,38 @@ test("the first accepted candidate establishes the best score after earlier reje
   }), [false, true, true]);
 });
 
+test("a later batch accepts and saves only scores strictly above its starting global best", () => {
+  const steps = [
+    { step: 1, score: 80, accepted: true },
+    { step: 2, score: 79, accepted: false },
+    { step: 3, score: 81, accepted: true },
+  ];
+  const tracker = createCodexOperationTracker({ maximumIterations: 3 });
+  for (const index of [0, 1]) {
+    ingestSuccessfulIteration(tracker, index);
+    tracker.ingestLine(mcpEvent("open_file", { arguments: { path: "/tmp/job/final.fold" } }));
+  }
+  ingestSuccessfulIteration(tracker, 2);
+  tracker.ingestLine(mcpEvent("export_file", { arguments: { path: "/tmp/job/final.fold" } }));
+
+  assert.deepEqual(assertCodexDecisionEvidence(steps, tracker.snapshot(), {
+    finalFoldPath: "/tmp/job/final.fold",
+    startingBestScore: 80,
+  }), [false, false, true]);
+});
+
+test("saving a tie with the previous batch best is rejected as contradictory evidence", () => {
+  const tracker = createCodexOperationTracker({ maximumIterations: 1 });
+  ingestSuccessfulIteration(tracker, 0);
+  tracker.ingestLine(mcpEvent("export_file", { arguments: { path: "/tmp/job/final.fold" } }));
+  assert.throws(() => assertCodexDecisionEvidence([
+    { step: 1, score: 80, accepted: true },
+  ], tracker.snapshot(), {
+    finalFoldPath: "/tmp/job/final.fold",
+    startingBestScore: 80,
+  }), /不採用候補を最良FOLDへ保存/);
+});
+
 test("Codex exec uses JSONL with isolated stdout parsing and noninteractive safe flags", async () => {
   const source = await readFile(new URL("../local-oriedita/codex-oriedita-runner.mjs", import.meta.url), "utf8");
   assert.match(source, /"--json"/);
@@ -434,8 +697,12 @@ test("Codex exec uses JSONL with isolated stdout parsing and noninteractive safe
   assert.match(source, /const deadlineAt = Date\.now\(\) \+ Math\.max/);
   assert.match(source, /detached: useProcessGroup/);
   assert.match(source, /process\.kill\(-child\.pid, signal\)/);
+  assert.match(source, /writeCodexProcessLease\(processLeasePath, processLease\)/);
+  assert.match(source, /clearCodexProcessLease\(processLeasePath, processLease\.lease_id\)/);
   assert.match(source, /terminate\("SIGTERM"\)/);
   assert.match(source, /terminate\("SIGKILL"\)/);
+  assert.match(source, /signal\?\.addEventListener\("abort", abortRun/);
+  assert.match(source, /error\.name = "AbortError"/);
   assert.match(source, /if \(timedOut\) rejectRun/);
   assert.match(source, /assertCodexOperationSnapshot\(operationSnapshot/);
   assert.match(source, /assertCodexDecisionEvidence\(factualSteps, operationSnapshot/);

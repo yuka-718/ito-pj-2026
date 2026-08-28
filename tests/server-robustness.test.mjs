@@ -1,15 +1,32 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import test, { after } from "node:test";
 
 process.env.ORI_AI_LOCAL_HOST = "127.0.0.1";
 process.env.ORI_AI_LOCAL_PORT = "0";
+process.env.ORI_AI_RESTORE_JOBS = "0";
 
 const {
   assertSuccessfulFinalFoldCalculation,
+  assertCodexBatchTransition,
+  appendDurableJsonLine,
+  cancelJob,
+  codexProcessLeaseMatches,
+  createCodexOperationSummary,
+  createJobAdmissionGate,
+  loadCommittedCodexActionKeys,
+  loadPersistedCodexActionHistory,
+  mergeCodexBatchOperationSummary,
+  persistJobState,
+  restorePersistedJobs,
+  runCodexBatchesUntilTarget,
   runOrieditaModifiabilitySmokeTest,
   searchedStructuralPatternCount,
   server,
+  terminateStaleCodexProcessLease,
 } = await import("../local-oriedita/server.mjs?server-robustness-test");
 
 if (!server.listening) await once(server, "listening");
@@ -26,6 +43,640 @@ test("image-only and reference-less jobs do not report a 5000-pattern text searc
   assert.equal(searchedStructuralPatternCount("   "), 0);
   assert.equal(searchedStructuralPatternCount(null), 0);
   assert.equal(searchedStructuralPatternCount("鶴"), 5_000);
+});
+
+test("concurrent job creation reserves one active slot and at most three waiting slots", async () => {
+  const queued = [];
+  let active = false;
+  let releaseCreations;
+  const creationBarrier = new Promise((resolve) => {
+    releaseCreations = resolve;
+  });
+  const gate = createJobAdmissionGate({
+    queueList: queued,
+    isActive: () => active,
+    maxWaitingJobs: 3,
+  });
+
+  const submissions = Array.from({ length: 12 }, (_, index) => gate.run(async () => {
+    await creationBarrier;
+    queued.push(index);
+    if (!active) {
+      active = true;
+      queued.shift();
+    }
+    return index;
+  }));
+
+  assert.equal(gate.reservations, 4);
+  releaseCreations();
+  const results = await Promise.allSettled(submissions);
+  const accepted = results.filter(({ status }) => status === "fulfilled");
+  const rejected = results.filter(({ status }) => status === "rejected");
+  assert.equal(accepted.length, 4);
+  assert.equal(rejected.length, 8);
+  assert.equal(queued.length, 3);
+  assert.equal(gate.reservations, 0);
+  assert.ok(rejected.every(({ reason }) => reason?.status === 429));
+});
+
+test("failed job creation releases its admission reservation", async () => {
+  const queued = [];
+  let releaseFailure;
+  let releaseCreations;
+  const failureBarrier = new Promise((resolve) => {
+    releaseFailure = resolve;
+  });
+  const creationBarrier = new Promise((resolve) => {
+    releaseCreations = resolve;
+  });
+  const gate = createJobAdmissionGate({
+    queueList: queued,
+    isActive: () => true,
+    maxWaitingJobs: 3,
+  });
+
+  const failed = gate.run(async () => {
+    await failureBarrier;
+    throw new Error("creation failed");
+  });
+  const first = gate.run(() => creationBarrier);
+  const second = gate.run(() => creationBarrier);
+  await assert.rejects(gate.run(() => creationBarrier), (error) => error?.status === 429);
+
+  releaseFailure();
+  await assert.rejects(failed, /creation failed/);
+  const replacement = gate.run(() => creationBarrier);
+  assert.equal(gate.reservations, 3);
+
+  releaseCreations();
+  await Promise.all([first, second, replacement]);
+  assert.equal(gate.reservations, 0);
+});
+
+function completedCodexBatch(score, iterationOffset, target = 99) {
+  return {
+    score,
+    best_step: iterationOffset + 10,
+    iteration_offset: iterationOffset,
+    target_score: target,
+    target_reached: score >= target,
+    steps: Array.from({ length: 10 }, (_, index) => ({
+      step: index + 1,
+      score,
+      accepted: index === 9,
+    })),
+    operation_counts: {
+      add_line: 10,
+      calculate_fold: 11,
+      get_folded_figure: 11,
+      open_file: 5,
+      export_file: 3,
+      required_rollbacks: 9,
+      completed_iterations: 10,
+      action_keys: Array.from(
+        { length: 10 },
+        (_, index) => `MOUNTAIN:${iterationOffset + index}:0:${iterationOffset + index}:1`,
+      ),
+    },
+  };
+}
+
+test("Codex jobs have no evaluation-count limit and continue in ten-operation batches until 99", async () => {
+  const scores = [42, 81, 98, 98, 99];
+  const observed = [];
+  const result = await runCodexBatchesUntilTarget({
+    runBatch: async ({ batchNumber, startingBestScore, iterationOffset }) => {
+      observed.push({ batchNumber, startingBestScore, iterationOffset });
+      return completedCodexBatch(scores[batchNumber - 1], iterationOffset);
+    },
+  });
+
+  assert.deepEqual(observed, [
+    { batchNumber: 1, startingBestScore: -1, iterationOffset: 0 },
+    { batchNumber: 2, startingBestScore: 42, iterationOffset: 10 },
+    { batchNumber: 3, startingBestScore: 81, iterationOffset: 20 },
+    { batchNumber: 4, startingBestScore: 98, iterationOffset: 30 },
+    { batchNumber: 5, startingBestScore: 98, iterationOffset: 40 },
+  ]);
+  assert.equal(result.bestScore, 99);
+  assert.equal(result.batchesCompleted, 5);
+  assert.equal(result.evaluationsCompleted, 50);
+});
+
+test("Codex scheduling yields after one complete batch and resumes with persisted offsets", async () => {
+  const observed = [];
+  const result = await runCodexBatchesUntilTarget({
+    startingBestScore: 81,
+    startingIterationOffset: 20,
+    startingBatchNumber: 2,
+    startingBestStep: 17,
+    maximumBatches: 1,
+    runBatch: async ({ batchNumber, startingBestScore, iterationOffset }) => {
+      observed.push({ batchNumber, startingBestScore, iterationOffset });
+      return completedCodexBatch(90, iterationOffset);
+    },
+  });
+
+  assert.deepEqual(observed, [{ batchNumber: 3, startingBestScore: 81, iterationOffset: 20 }]);
+  assert.equal(result.targetReached, false);
+  assert.equal(result.batchesRun, 1);
+  assert.equal(result.batchesCompleted, 3);
+  assert.equal(result.evaluationsCompleted, 30);
+});
+
+test("an aborted Codex batch loop does not start another evaluation", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let called = false;
+  await assert.rejects(
+    runCodexBatchesUntilTarget({
+      signal: controller.signal,
+      runBatch: async () => {
+        called = true;
+        return completedCodexBatch(99, 0);
+      },
+    }),
+    (error) => error?.name === "JobCancelledError",
+  );
+  assert.equal(called, false);
+});
+
+test("queued and running jobs can be cancelled and cancellation survives restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-job-recovery-"));
+  try {
+    const id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+    const directory = join(root, id);
+    await mkdir(directory, { recursive: true });
+    const job = {
+      id,
+      type: "design",
+      directory,
+      designMode: "codex_mcp_loop",
+      status: "queued",
+      message: "処理待ち",
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      result: null,
+      error: null,
+      cancelRequested: false,
+    };
+    const queued = [id, "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"];
+    await persistJobState(job);
+    await cancelJob(job, { queueList: queued, abortController: null });
+    assert.equal(job.status, "cancelled");
+    assert.deepEqual(queued, ["bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"]);
+
+    const saved = JSON.parse(await readFile(join(directory, "job-state.json"), "utf8"));
+    assert.equal(saved.job.cancelRequested, true);
+    assert.equal(saved.job.status, "cancelled");
+
+    job.status = "running";
+    job.cancelRequested = false;
+    job.completedAt = null;
+    const controller = new AbortController();
+    await cancelJob(job, { queueList: [], abortController: controller });
+    assert.equal(controller.signal.aborted, true);
+    assert.equal(job.status, "running");
+    assert.equal(job.cancelRequested, true);
+
+    const restoredJobs = new Map();
+    const restoredQueue = [];
+    await restorePersistedJobs({ root, jobsMap: restoredJobs, queueList: restoredQueue });
+    assert.equal(restoredJobs.get(id).status, "cancelled");
+    assert.deepEqual(restoredQueue, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("running persisted jobs are requeued after an API restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-job-recovery-"));
+  try {
+    const id = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+    const directory = join(root, id);
+    await mkdir(directory, { recursive: true });
+    await persistJobState({
+      id,
+      type: "design",
+      directory,
+      designMode: "codex_mcp_loop",
+      status: "running",
+      message: "実行中",
+      createdAt: new Date().toISOString(),
+      startedAt: new Date().toISOString(),
+      completedAt: null,
+      result: null,
+      error: null,
+      cancelRequested: false,
+    });
+    const restoredJobs = new Map();
+    const restoredQueue = [];
+    const restored = await restorePersistedJobs({ root, jobsMap: restoredJobs, queueList: restoredQueue });
+    assert.deepEqual(restored, [id]);
+    assert.equal(restoredJobs.get(id).status, "queued");
+    assert.match(restoredJobs.get(id).message, /再開/);
+    assert.deepEqual(restoredQueue, [id]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex batch transition rejects an unverified 99 claim and incomplete Oriedita evidence", () => {
+  const incomplete = completedCodexBatch(99, 10);
+  incomplete.target_reached = false;
+  assert.throws(
+    () => assertCodexBatchTransition(incomplete, { startingBestScore: 90, iterationOffset: 10 }),
+    /目標到達判定/,
+  );
+
+  const missingOperation = completedCodexBatch(98, 10);
+  missingOperation.operation_counts.get_folded_figure = 9;
+  assert.throws(
+    () => assertCodexBatchTransition(missingOperation, { startingBestScore: 90, iterationOffset: 10 }),
+    /Oriedita実操作数/,
+  );
+});
+
+test("operation summary accumulates every batch without inventing an evaluation limit", () => {
+  const first = completedCodexBatch(70, 0);
+  const second = completedCodexBatch(99, 10);
+  const initial = createCodexOperationSummary();
+  const afterFirst = mergeCodexBatchOperationSummary(initial, first, {
+    batchNumber: 1,
+    startingBestScore: -1,
+    iterationOffset: 0,
+    artifactDirectory: "batches/000001",
+  });
+  const final = mergeCodexBatchOperationSummary(afterFirst, second, {
+    batchNumber: 2,
+    startingBestScore: 70,
+    iterationOffset: 10,
+    artifactDirectory: "batches/000002",
+  });
+
+  assert.equal(final.evaluation_limit, null);
+  assert.equal(final.target_score, 99);
+  assert.equal(final.batches_completed, 2);
+  assert.equal(final.evaluations_completed, 20);
+  assert.equal(final.best_step, 20);
+  assert.equal(final.counts.add_line, 20);
+  assert.equal(final.counts.calculate_fold, 22);
+  assert.equal(final.counts.get_folded_figure, 22);
+  assert.equal(final.counts.required_rollbacks, 18);
+  assert.equal(final.target_reached, true);
+  assert.deepEqual(final.batches.map(({ artifact_directory: path }) => path), [
+    "batches/000001",
+    "batches/000002",
+  ]);
+
+  let bounded = createCodexOperationSummary();
+  for (let batchNumber = 1; batchNumber <= 100; batchNumber += 1) {
+    bounded = mergeCodexBatchOperationSummary(bounded, completedCodexBatch(98, (batchNumber - 1) * 10), {
+      batchNumber,
+      startingBestScore: batchNumber === 1 ? -1 : 98,
+      iterationOffset: (batchNumber - 1) * 10,
+      artifactDirectory: `batches/${String(batchNumber).padStart(6, "0")}`,
+    });
+  }
+  assert.equal(bounded.evaluations_completed, 1_000);
+  assert.equal(bounded.batches.length, 80);
+  assert.equal(bounded.omitted_batches, 20);
+  assert.equal(bounded.complete_batch_log, "batch-history.jsonl");
+  assert.equal(bounded.batches[0].batch, 21);
+});
+
+test("committed action history rejects a duplicate older than the retained 80 attempts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-action-history-"));
+  try {
+    const batches = join(root, "batches");
+    for (let batchNumber = 1; batchNumber <= 9; batchNumber += 1) {
+      const batchDirectory = join(batches, String(batchNumber).padStart(6, "0"));
+      await mkdir(batchDirectory, { recursive: true });
+      const evaluation = completedCodexBatch(90, (batchNumber - 1) * 10);
+      await writeFile(
+        join(batchDirectory, "evaluation.json"),
+        JSON.stringify(evaluation),
+      );
+    }
+    const history = await loadCommittedCodexActionKeys(root, 9);
+    assert.equal(history.size, 90);
+
+    const duplicateDirectory = join(batches, "000010");
+    await mkdir(duplicateDirectory, { recursive: true });
+    const duplicate = completedCodexBatch(95, 90);
+    duplicate.operation_counts.action_keys[9] = "MOUNTAIN:0:0:0:1";
+    await writeFile(
+      join(duplicateDirectory, "evaluation.json"),
+      JSON.stringify(duplicate),
+    );
+    await assert.rejects(
+      loadCommittedCodexActionKeys(root, 10),
+      /過去試行と重複/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("restart history combines completed and fsynced incomplete-batch action keys and repairs a torn tail", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-action-wal-"));
+  try {
+    const batchDirectory = join(root, "batches", "000001");
+    await mkdir(batchDirectory, { recursive: true });
+    const completed = completedCodexBatch(90, 0);
+    await writeFile(join(batchDirectory, "evaluation.json"), JSON.stringify(completed));
+    const inflightKey = "VALLEY:999:0:999:1000000";
+    await appendDurableJsonLine(join(root, "action-attempts.jsonl"), {
+      schema: "oriai-codex-action-wal-v1",
+      phase: "inflight",
+      batch: 2,
+      batch_step: 1,
+      step: 11,
+      action_key: inflightKey,
+      arguments: { ax: 0.000999, ay: 0, bx: 0.000999, by: 1, color: "VALLEY" },
+    });
+    await appendDurableJsonLine(join(root, "action-attempts.jsonl"), {
+      schema: "oriai-codex-action-wal-v1",
+      phase: "evidenced",
+      batch: 2,
+      batch_step: 1,
+      step: 11,
+      action_key: inflightKey,
+      crease_hash_before: "before",
+      crease_hash_after: "after",
+    });
+    await writeFile(join(root, "action-attempts.jsonl"), "{incomplete-tail", { flag: "a" });
+
+    const history = await loadPersistedCodexActionHistory(root, 1);
+    assert.equal(history.keys.size, 11);
+    assert.equal(history.keys.has(completed.operation_counts.action_keys[0]), true);
+    assert.equal(history.keys.has(inflightKey), true);
+    assert.equal(history.inflight.length, 1);
+    assert.equal(history.inflight[0].phase, "evidenced");
+    assert.equal(history.inflight[0].batch, 2);
+    const repairedWal = await readFile(join(root, "action-attempts.jsonl"), "utf8");
+    assert.equal(repairedWal.endsWith("\n"), true);
+    assert.equal(repairedWal.includes("{incomplete-tail"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("durable action WAL append removes a torn tail before preserving the next action", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-action-wal-tail-"));
+  try {
+    const walPath = join(root, "action-attempts.jsonl");
+    const priorKeys = [
+      "MOUNTAIN:101:0:101:1000000",
+      "VALLEY:202:0:202:1000000",
+    ];
+    for (const [index, actionKey] of priorKeys.entries()) {
+      await appendDurableJsonLine(walPath, {
+        schema: "oriai-codex-action-wal-v1",
+        phase: "evidenced",
+        batch: 1,
+        batch_step: index + 1,
+        step: index + 1,
+        action_key: actionKey,
+      });
+    }
+    await writeFile(walPath, '{"schema":"oriai-codex-action-wal-v1","phase":"inflight"', { flag: "a" });
+
+    const nextKey = "MOUNTAIN:303:0:303:1000000";
+    await appendDurableJsonLine(walPath, {
+      schema: "oriai-codex-action-wal-v1",
+      phase: "inflight",
+      batch: 2,
+      batch_step: 1,
+      step: 3,
+      action_key: nextKey,
+    });
+
+    const reloaded = await loadPersistedCodexActionHistory(root, 0);
+    assert.deepEqual(reloaded.events.map((event) => event.action_key), [...priorKeys, nextKey]);
+    assert.deepEqual([...reloaded.keys], [...priorKeys, nextKey]);
+    const persistedLines = (await readFile(walPath, "utf8")).trimEnd().split("\n");
+    assert.equal(persistedLines.length, 3);
+    assert.deepEqual(persistedLines.map((line) => JSON.parse(line).action_key), [...priorKeys, nextKey]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("durable action WAL append preserves a complete final record that only lacks a newline", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-action-wal-newline-"));
+  try {
+    const walPath = join(root, "action-attempts.jsonl");
+    const first = {
+      schema: "oriai-codex-action-wal-v1",
+      phase: "inflight",
+      batch: 1,
+      batch_step: 1,
+      step: 1,
+      action_key: "VALLEY:404:0:404:1000000",
+    };
+    const second = {
+      schema: "oriai-codex-action-wal-v1",
+      phase: "inflight",
+      batch: 1,
+      batch_step: 2,
+      step: 2,
+      action_key: "MOUNTAIN:505:0:505:1000000",
+    };
+    await writeFile(walPath, JSON.stringify(first));
+    await appendDurableJsonLine(walPath, second);
+
+    const reloaded = await loadPersistedCodexActionHistory(root, 0);
+    assert.deepEqual(reloaded.events.map((event) => event.action_key), [first.action_key, second.action_key]);
+    const persistedLines = (await readFile(walPath, "utf8")).trimEnd().split("\n");
+    assert.deepEqual(persistedLines.map((line) => JSON.parse(line)), [first, second]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("restart terminates only a matching stale Codex process group before requeue", async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-process-lease-"));
+  try {
+    const job = { id: "dddddddd-dddd-4ddd-8ddd-dddddddddddd", directory: root };
+    const batchDirectory = join(root, "batches", "000002");
+    const lease = {
+      schema: "oriai-codex-process-lease-v1",
+      lease_id: "lease-1",
+      pid: 43210,
+      process_group: process.platform === "win32" ? 43210 : -43210,
+      codex_path: "/opt/bin/codex",
+      directory: batchDirectory,
+    };
+    await writeFile(join(root, "codex-process-lease.json"), JSON.stringify(lease));
+    const command = `/opt/bin/codex exec --cd ${batchDirectory}`;
+    assert.equal(codexProcessLeaseMatches(lease, job, command), true);
+
+    let alive = true;
+    const signals = [];
+    const result = await terminateStaleCodexProcessLease(job, {
+      isAlive: (target) => {
+        assert.equal(target, lease.process_group);
+        return alive;
+      },
+      inspectCommand: () => command,
+      inspectProcessGroup: (target) => {
+        assert.equal(target, lease.process_group);
+        return [{
+          pid: lease.pid,
+          process_group: lease.process_group,
+          command,
+          cwd: batchDirectory,
+        }];
+      },
+      sendSignal: (target, signal) => {
+        signals.push({ target, signal });
+        alive = false;
+      },
+      wait: async () => {},
+      graceMs: 1,
+      pollMs: 1,
+    });
+    assert.deepEqual(result, { found: true, terminated: true });
+    assert.deepEqual(signals, [{
+      target: process.platform === "win32" ? 43210 : -43210,
+      signal: "SIGTERM",
+    }]);
+
+    await writeFile(join(root, "codex-process-lease.json"), JSON.stringify(lease));
+    await assert.rejects(
+      terminateStaleCodexProcessLease(job, {
+        isAlive: () => true,
+        inspectCommand: () => "/usr/bin/not-codex --different-job",
+        inspectProcessGroup: () => [{
+          pid: lease.pid,
+          process_group: lease.process_group,
+          command: "/usr/bin/not-codex --different-job",
+          cwd: batchDirectory,
+        }],
+        sendSignal: () => assert.fail("a reused PID must not be killed"),
+      }),
+      /一致しない/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("restart terminates a live leased process group after its Codex leader exits", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-orphaned-process-group-"));
+  try {
+    const job = { id: "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee", directory: root };
+    const batchDirectory = join(root, "batches", "000003");
+    const lease = {
+      schema: "oriai-codex-process-lease-v1",
+      lease_id: "lease-orphan",
+      pid: 43220,
+      process_group: -43220,
+      codex_path: "/opt/bin/codex",
+      directory: batchDirectory,
+    };
+    const leasePath = join(root, "codex-process-lease.json");
+    await writeFile(leasePath, JSON.stringify(lease));
+
+    let groupAlive = true;
+    const signals = [];
+    const proxyCommand = `${process.execPath} ${resolve("local-oriedita/restricted-oriedita-mcp.mjs")}`;
+    const result = await terminateStaleCodexProcessLease(job, {
+      isAlive: (target) => {
+        assert.equal(target, lease.process_group, "liveness must probe the exact leased PGID");
+        return groupAlive;
+      },
+      inspectCommand: () => assert.fail("the dead leader cannot provide provenance"),
+      inspectProcessGroup: (target) => {
+        assert.equal(target, lease.process_group);
+        return [{
+          pid: lease.pid + 1,
+          process_group: lease.process_group,
+          command: proxyCommand,
+          cwd: batchDirectory,
+        }];
+      },
+      sendSignal: (target, signal) => {
+        signals.push({ target, signal });
+        if (signal === "SIGKILL") groupAlive = false;
+      },
+      wait: async () => {},
+      graceMs: 0,
+      pollMs: 1,
+    });
+
+    assert.deepEqual(result, { found: true, terminated: true });
+    assert.deepEqual(signals, [
+      { target: lease.process_group, signal: "SIGTERM" },
+      { target: lease.process_group, signal: "SIGKILL" },
+    ]);
+    await assert.rejects(readFile(leasePath), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("restart leaves a live unrelated process group and its forged lease untouched", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = await mkdtemp(join(tmpdir(), "oriai-unrelated-process-group-"));
+  try {
+    const job = { id: "ffffffff-ffff-4fff-8fff-ffffffffffff", directory: root };
+    const batchDirectory = join(root, "batches", "000004");
+    const lease = {
+      schema: "oriai-codex-process-lease-v1",
+      lease_id: "lease-forged",
+      pid: 43230,
+      process_group: -43230,
+      codex_path: "/opt/bin/codex",
+      directory: batchDirectory,
+    };
+    const leasePath = join(root, "codex-process-lease.json");
+    await writeFile(leasePath, JSON.stringify(lease));
+    const signals = [];
+
+    await assert.rejects(
+      terminateStaleCodexProcessLease(job, {
+        isAlive: (target) => {
+          assert.equal(target, lease.process_group);
+          return true;
+        },
+        inspectCommand: () => assert.fail("the leased leader is not alive"),
+        inspectProcessGroup: () => [{
+          pid: lease.pid + 7,
+          process_group: lease.process_group,
+          command: "/usr/bin/node /tmp/unrelated-mcp.mjs",
+          cwd: batchDirectory,
+        }],
+        sendSignal: (target, signal) => signals.push({ target, signal }),
+      }),
+      /一致しない/,
+    );
+
+    assert.deepEqual(signals, []);
+    assert.deepEqual(JSON.parse(await readFile(leasePath, "utf8")), lease);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("health advertises a 99 target and no job-level evaluation limit", async () => {
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const response = await fetch(`http://127.0.0.1:${address.port}/health`);
+  const payload = await response.json();
+  assert.equal(response.status, 200);
+  assert.equal(payload.result.targetScore, 99);
+  assert.equal(payload.result.evaluationLimit, null);
+  assert.equal(payload.result.maxIterations, null);
+  assert.equal(payload.result.batchIterations, 10);
+  assert.equal(payload.result.scheduling.policy, "round_robin_per_codex_batch");
+  assert.equal(payload.result.scheduling.restartRecovery, true);
 });
 
 test("final fold calculation requires both a started calculation and zero violations", () => {

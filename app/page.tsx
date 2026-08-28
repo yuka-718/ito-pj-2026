@@ -4,6 +4,17 @@ import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 
 import OrigamiSimulator3D from "./OrigamiSimulator3D";
 import {
+  hasReachedAppearanceTarget,
+  TARGET_APPEARANCE_SCORE,
+} from "./evaluation-target";
+import {
+  createCOrigamiFinalState,
+  foldFromDataUrl,
+  type COrigamiFinalState,
+  type FinalStateStageId,
+  type FoldDocument,
+} from "./corigami-final-state";
+import {
   analyzeDescription,
   candidateToFold,
   generateCandidates,
@@ -13,6 +24,7 @@ import {
 const API_DISCOVERY_URL = "https://api.github.com/repos/yuka-718/oriai/contents/oriedita-upstream.json?ref=runtime";
 const API_RECONNECT_ATTEMPTS = 30;
 const API_RECONNECT_DELAY_MS = 2_000;
+const ACTIVE_JOB_STORAGE_KEY = "oriai:active-codex-job:v1";
 let cachedApiOrigin = "";
 
 type UploadedImage = {
@@ -32,6 +44,8 @@ type Evaluation = {
   iterations: number;
   summary: string;
   mode: string;
+  targetScore?: number;
+  appearance?: { score?: number };
   steps?: EvaluationStep[];
 };
 
@@ -40,11 +54,22 @@ type OrieditaResult = {
   creaseImage: string;
   foldedImage: string;
   foldFile: string;
+  sourceFoldFile?: string;
+};
+
+type DisplayResult = OrieditaResult & {
+  finalState: COrigamiFinalState;
+};
+
+type StoredActiveJob = {
+  id: string;
+  description: string;
+  startedAt: number;
 };
 
 type LocalJob = {
   id: string;
-  status: "queued" | "running" | "done" | "failed";
+  status: "queued" | "running" | "done" | "failed" | "cancelled";
   message: string;
   result: OrieditaResult | null;
   error: string | null;
@@ -61,6 +86,10 @@ function fileToDataUrl(file: File) {
 
 async function resolveApiOrigin(force = false) {
   if (!force && cachedApiOrigin) return cachedApiOrigin;
+  if (["127.0.0.1", "localhost"].includes(window.location.hostname)) {
+    cachedApiOrigin = `http://${window.location.hostname}:8788`;
+    return cachedApiOrigin;
+  }
   const discovery = new URL(API_DISCOVERY_URL);
   discovery.searchParams.set("refresh", String(Date.now()));
   const response = await fetch(discovery, {
@@ -77,6 +106,38 @@ async function resolveApiOrigin(force = false) {
 }
 
 const delay = (milliseconds: number) => new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+
+function readStoredActiveJob() {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(ACTIVE_JOB_STORAGE_KEY) ?? "null") as Partial<StoredActiveJob> | null;
+    if (!value || typeof value.id !== "string" || typeof value.description !== "string"
+      || typeof value.startedAt !== "number" || !Number.isFinite(value.startedAt)) return null;
+    return value as StoredActiveJob;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredActiveJob(job: StoredActiveJob | null) {
+  try {
+    if (job) window.localStorage.setItem(ACTIVE_JOB_STORAGE_KEY, JSON.stringify(job));
+    else window.localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+  } catch {
+    // A private browsing/storage failure must not stop the active server job.
+  }
+}
+
+function createDisplayResult(completed: OrieditaResult, description: string): DisplayResult {
+  const checkedFold = foldFromDataUrl(completed.foldFile);
+  if (!checkedFold) {
+    throw new Error("検証済みの最終FOLDを読み取れなかったため、結果を表示できませんでした");
+  }
+  const analysis = analyzeDescription(description);
+  return {
+    ...completed,
+    finalState: createCOrigamiFinalState(checkedFold, analysis.parts, description),
+  };
+}
 
 async function waitForApiOrigin() {
   let lastError: unknown = null;
@@ -134,45 +195,48 @@ async function apiFetch(path: string, init?: RequestInit) {
   );
 }
 
-async function waitForJob(id: string, onMessage: (message: string) => void) {
-  let transientFailures = 0;
-  for (let attempt = 0; attempt < 720; attempt += 1) {
+async function waitForJob(id: string, onMessage: (message: string) => void, signal?: AbortSignal) {
+  for (let attempt = 0; ; attempt += 1) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     await new Promise((resolve) => window.setTimeout(resolve, attempt < 3 ? 1200 : 2500));
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
 
     let response: Response;
     try {
       response = await apiFetch(`/jobs/${id}`);
-    } catch (error) {
-      transientFailures += 1;
-      if (transientFailures > 12) throw error;
+    } catch {
       continue;
     }
 
     let payload: { ok: boolean; job?: LocalJob; error?: string };
     try {
       payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
-    } catch (error) {
-      transientFailures += 1;
-      if (transientFailures > 12) throw error;
+    } catch {
       continue;
     }
 
     if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理状況を取得できませんでした");
-    transientFailures = 0;
     onMessage(payload.job.message);
-    if (payload.job.status === "done" && payload.job.result) return payload.job.result;
+    if (payload.job.status === "done" && payload.job.result) {
+      if (!hasReachedAppearanceTarget(payload.job.result.evaluation)) {
+        throw new Error(`評価が${TARGET_APPEARANCE_SCORE}%へ到達する前に処理が終了しました`);
+      }
+      return payload.job.result;
+    }
     if (payload.job.status === "failed") throw new Error(payload.job.error ?? "生成に失敗しました");
+    if (payload.job.status === "cancelled") throw new Error("生成を中止しました");
   }
-  throw new Error("生成処理がタイムアウトしました");
 }
 
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [image, setImage] = useState<UploadedImage | null>(null);
-  const [result, setResult] = useState<OrieditaResult | null>(null);
+  const [result, setResult] = useState<DisplayResult | null>(null);
+  const [activeStageId, setActiveStageId] = useState<FinalStateStageId>("angle-preview");
   const [runState, setRunState] = useState<"idle" | "running" | "error">("idle");
   const [message, setMessage] = useState("");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
 
   useEffect(() => () => {
     if (image?.url) URL.revokeObjectURL(image.url);
@@ -180,16 +244,50 @@ export default function Home() {
 
   useEffect(() => {
     if (runState !== "running") return;
-    const startedAt = Date.now();
+    const startedAt = runStartedAt ?? Date.now();
     const timer = window.setInterval(() => {
       setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1_000));
     }, 250);
     return () => window.clearInterval(timer);
-  }, [runState]);
+  }, [runStartedAt, runState]);
+
+  useEffect(() => {
+    const stored = readStoredActiveJob();
+    if (!stored) return;
+    const controller = new AbortController();
+    const resumeTimer = window.setTimeout(() => {
+      setPrompt(stored.description);
+      setResult(null);
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - stored.startedAt) / 1_000)));
+      setRunStartedAt(stored.startedAt);
+      setRunState("running");
+      setMessage(`${TARGET_APPEARANCE_SCORE}%一致までCodexとOrieditaで評価中`);
+      void waitForJob(stored.id, setMessage, controller.signal).then((completed) => {
+        if (controller.signal.aborted) return;
+        setResult(createDisplayResult(completed, stored.description));
+        setRunState("idle");
+        setRunStartedAt(null);
+        setMessage("生成が完了しました");
+        writeStoredActiveJob(null);
+      }).catch((error) => {
+        if (controller.signal.aborted) return;
+        setRunState("error");
+        setRunStartedAt(null);
+        setMessage(error instanceof Error ? error.message : "生成できませんでした");
+        writeStoredActiveJob(null);
+      });
+    }, 0);
+    return () => {
+      window.clearTimeout(resumeTimer);
+      controller.abort();
+    };
+  }, []);
 
   function resetResult() {
     setResult(null);
+    setActiveStageId("angle-preview");
     setRunState("idle");
+    setRunStartedAt(null);
     setMessage("");
   }
 
@@ -222,26 +320,32 @@ export default function Home() {
 
     setResult(null);
     setElapsedSeconds(0);
+    const startedAt = Date.now();
+    setRunStartedAt(startedAt);
     setRunState("running");
-    setMessage("CodexがOrieditaを準備中");
+    setMessage(`${TARGET_APPEARANCE_SCORE}%一致までCodexとOrieditaで評価中`);
 
     try {
       const analysis = analyzeDescription(description);
       const seed = hashString(`${description}:${image?.file.size ?? 0}:${image?.file.lastModified ?? 0}`);
-      const candidates = generateCandidates({
+      const candidateModels = generateCandidates({
         description,
         parts: analysis.parts,
         complexity: 4,
         symmetry: true,
         seed,
-      }).map((candidate) => JSON.parse(candidateToFold(candidate, description)));
+      });
+      const candidates = candidateModels.map((candidate) =>
+        JSON.parse(candidateToFold(candidate, description)) as FoldDocument
+      );
+      const primaryFold = candidates[0];
       const response = await apiFetch("/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           prompt: description,
           referenceImage: image ? await fileToDataUrl(image.file) : null,
-          fold: candidates[0],
+          fold: primaryFold,
           candidates,
           goal: {
             presetKey: analysis.presetKey,
@@ -252,15 +356,24 @@ export default function Home() {
       });
       const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
       if (!response.ok || !payload.job) throw new Error(payload.error ?? "生成を開始できませんでした");
+      writeStoredActiveJob({ id: payload.job.id, description, startedAt });
       const completed = await waitForJob(payload.job.id, setMessage);
-      setResult(completed);
+      setResult(createDisplayResult(completed, description));
       setRunState("idle");
+      setRunStartedAt(null);
       setMessage("生成が完了しました");
+      writeStoredActiveJob(null);
     } catch (error) {
       setRunState("error");
+      setRunStartedAt(null);
       setMessage(error instanceof Error ? error.message : "生成できませんでした");
+      writeStoredActiveJob(null);
     }
   }
+
+  const activeStage = result?.finalState.stages.find((stage) => stage.id === activeStageId)
+    ?? result?.finalState.stages[0]
+    ?? null;
 
   return (
     <main className="generatorPage">
@@ -274,7 +387,7 @@ export default function Home() {
             {runState === "error"
               ? message
               : runState === "running"
-                ? "CodexがOrieditaを操作・評価中…"
+                ? "展開図と4段階の最終状態を生成中…"
                 : "つくりたい折り紙を入力"}
           </span>
           <textarea
@@ -325,30 +438,115 @@ export default function Home() {
         <p className="srOnly" role="status" aria-live="polite">{message}</p>
       </form>
 
-      {result && (
+      {result && hasReachedAppearanceTarget(result.evaluation) && (
         <section className="outputs" aria-label="生成結果">
-          <article className="outputPanel">
-            <div className="outputTitle">
-              <h1>展開図</h1>
-              <span>CODEX × ORIEDITA</span>
-            </div>
-            <div className="creaseStage">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img className="orieditaCrease" src={result.creaseImage} alt="CodexがOrieditaで作成した展開図" />
-            </div>
-          </article>
+          <div className="phaseOneGrid">
+            <article className="outputPanel creasePanel">
+              <div className="outputTitle">
+                <h1><b>1A</b> 展開図</h1>
+                <span>ORIEDITA CHECKED</span>
+              </div>
+              <div className="creaseStage">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img className="orieditaCrease" src={result.creaseImage} alt="Orieditaで検証した展開図" />
+              </div>
+              <div className="artifactBar">
+                <span>局所平坦折り・2D計算</span>
+                <a href={result.foldFile} download="oriai-final.fold">FOLDを保存</a>
+              </div>
+            </article>
 
-          <article className="outputPanel">
-            <div className="modelTitle">
-              <h1>完成形 3D</h1>
-              <span>{result.evaluation.iterations} EVALUATIONS</span>
-            </div>
-            <div className="modelStage">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img className="foldedModelFallback" src={result.foldedImage} alt="Orieditaの折り上がり結果" />
-              <OrigamiSimulator3D foldFile={result.foldFile} />
-            </div>
-          </article>
+            <article className="outputPanel foldedPanel">
+              <div className="foldedTitle">
+                <h1><b>1B</b> 折り上がり 2D</h1>
+                <span>FLAT FOLD</span>
+              </div>
+              <div className="folded2dStage">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img src={result.foldedImage} alt="Orieditaが計算した2D折り上がり" />
+              </div>
+              <div className="artifactBar">
+                <span>Oriedita flat-fold completed</span>
+                <span>{result.evaluation.mode}</span>
+              </div>
+            </article>
+          </div>
+
+          {activeStage && (
+            <article className="shapingPanel">
+              <header className="shapingHeader">
+                <div>
+                  <p>CORIGAMI-INSPIRED FINAL STATE</p>
+                  <h1>折角・姿勢・細部造形</h1>
+                </div>
+                <div className="cpIdentity">
+                  <span>SAME CP</span>
+                  <code>{result.finalState.cpHash}</code>
+                </div>
+              </header>
+
+              <div className="stageTabs" role="tablist" aria-label="造形段階">
+                {result.finalState.stages.map((stage) => (
+                  <button
+                    key={stage.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={stage.id === activeStage.id}
+                    className={stage.id === activeStage.id ? "isActive" : undefined}
+                    onClick={() => setActiveStageId(stage.id)}
+                  >
+                    <b>0{stage.phase}</b>
+                    <span>{stage.shortTitle}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="shapingBody">
+                <div className="shapingViewport">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img className="foldedModelFallback" src={result.foldedImage} alt="3D表示読込中の2D折り上がり" />
+                  <OrigamiSimulator3D foldFile={activeStage.foldFile} />
+                  <span className="dragHint">DRAG TO ROTATE</span>
+                </div>
+
+                <aside className="stageInspector">
+                  <div className="stageNumber">PHASE 0{activeStage.phase}</div>
+                  <h2>{activeStage.title}</h2>
+                  <p>{activeStage.description}</p>
+
+                  <dl className="angleStats">
+                    <div><dt>ACTIVE HINGES</dt><dd>{activeStage.angleSummary.activeCreases}</dd></div>
+                    <div><dt>ANGLE RANGE</dt><dd>{activeStage.angleSummary.minimumDeg}–{activeStage.angleSummary.maximumDeg}°</dd></div>
+                  </dl>
+
+                  <div className="operationList">
+                    <h3>{activeStage.id === "angle-preview" ? "角度設定" : "造形操作"}</h3>
+                    {activeStage.operations.map((operation) => (
+                      <div className="operationCard" key={operation.id}>
+                        <span>{operation.kind.replace("_", " ")}</span>
+                        <b>{operation.partLabel}</b>
+                        <p>{operation.instructionJa}</p>
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="validationBadges" aria-label="検証範囲">
+                    <span className="checked">同一CPグラフ</span>
+                    <span>ゼロ厚みpreview</span>
+                    <span>衝突未検証</span>
+                  </div>
+                  <a className="downloadFold" href={activeStage.foldFile} download={`oriai-phase-${activeStage.phase}.fold`}>
+                    この段階のFOLDを保存 <span aria-hidden="true">↓</span>
+                  </a>
+                </aside>
+              </div>
+
+              <footer className="scopeNote">
+                <strong>COrigami-inspired clean-room実装</strong>
+                <span>第1段階はOriedita検証済み。第2〜4段階は折順ではなく、同じ展開図へ折角を与えた最終状態previewです。紙厚・自己衝突は未検証です。</span>
+              </footer>
+            </article>
+          )}
         </section>
       )}
     </main>

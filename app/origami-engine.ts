@@ -21,6 +21,23 @@ export type Edge = {
   part: string | null;
 };
 
+export type SemanticTree = {
+  rootId: string;
+  nodes: Array<{
+    id: string;
+    label: string;
+    kind: "root" | "flap";
+    importance: number;
+    directionDeg: number;
+  }>;
+  edges: Array<{
+    id: string;
+    from: string;
+    to: string;
+    targetLength: number;
+  }>;
+};
+
 export type Candidate = {
   id: string;
   title: string;
@@ -31,6 +48,7 @@ export type Candidate = {
   rayAngles: number[];
   assignments: Exclude<Assignment, "B">[];
   partLabels: string[];
+  semanticTree: SemanticTree;
   degree: number;
   seed: number;
   residualRad: number;
@@ -357,6 +375,29 @@ function mapPartLabels(rayAngles: number[], parts: Part[]) {
   });
 }
 
+function buildSemanticTree(parts: Part[]): SemanticTree {
+  const fallback: Part = { id: "part-root", label: "中心", importance: 5, direction: 180 };
+  const root = parts.find((part) => /胴体|中心|body|center/i.test(part.label))
+    ?? [...parts].sort((a, b) => b.importance - a.importance || a.id.localeCompare(b.id))[0]
+    ?? fallback;
+  return {
+    rootId: root.id,
+    nodes: (parts.length ? parts : [fallback]).map((part) => ({
+      id: part.id,
+      label: part.label,
+      kind: part.id === root.id ? "root" : "flap",
+      importance: part.importance,
+      directionDeg: part.direction,
+    })),
+    edges: parts.filter((part) => part.id !== root.id).map((part, index) => ({
+      id: `tree-edge-${index + 1}`,
+      from: root.id,
+      to: part.id,
+      targetLength: round(0.35 + part.importance * 0.11, 3),
+    })),
+  };
+}
+
 function scoreAngles(rayAngles: number[], parts: Part[], symmetry: boolean, residualRad: number) {
   const weightedError = parts.reduce((total, part) => {
     const target = (part.direction * Math.PI) / 180;
@@ -434,6 +475,7 @@ function hydrateCandidate(
     rayAngles,
     assignments,
     partLabels,
+    semanticTree: buildSemanticTree(parts),
     degree: rayAngles.length,
     seed,
     residualRad,
@@ -518,6 +560,76 @@ function escapeXml(value: string) {
   })[character] ?? character);
 }
 
+function signedArea(face: number[], vertices: Point[]) {
+  return face.reduce((area, vertex, index) => {
+    const [x1, y1] = vertices[vertex];
+    const [x2, y2] = vertices[face[(index + 1) % face.length]];
+    return area + x1 * y2 - x2 * y1;
+  }, 0) / 2;
+}
+
+/**
+ * Derive the bounded faces of a connected planar straight-line graph.
+ *
+ * Candidate graphs are already split at every intersection. Walking the
+ * clockwise-most outgoing half edge keeps each bounded face on the left;
+ * the unbounded exterior is the only clockwise loop and is discarded.
+ */
+export function facesFromPlanarGraph(vertices: Point[], edges: Edge[]) {
+  const neighbors = Array.from({ length: vertices.length }, () => [] as number[]);
+  edges.forEach(({ vertices: [a, b] }) => {
+    neighbors[a].push(b);
+    neighbors[b].push(a);
+  });
+  neighbors.forEach((list, vertex) => {
+    const [cx, cy] = vertices[vertex];
+    list.sort((a, b) => {
+      const angleA = Math.atan2(vertices[a][1] - cy, vertices[a][0] - cx);
+      const angleB = Math.atan2(vertices[b][1] - cy, vertices[b][0] - cx);
+      return angleA - angleB;
+    });
+  });
+
+  const visited = new Set<string>();
+  const faces: number[][] = [];
+  const walk = (startA: number, startB: number) => {
+    const face: number[] = [];
+    let a = startA;
+    let b = startB;
+    const limit = edges.length * 2 + 2;
+    for (let step = 0; step < limit; step += 1) {
+      const key = `${a}:${b}`;
+      if (visited.has(key) && (a !== startA || b !== startB)) return [];
+      visited.add(key);
+      face.push(a);
+      const around = neighbors[b];
+      const incoming = around.indexOf(a);
+      if (incoming < 0 || !around.length) return [];
+      const next = around[(incoming - 1 + around.length) % around.length];
+      a = b;
+      b = next;
+      if (a === startA && b === startB) return face;
+    }
+    return [];
+  };
+
+  edges.forEach(({ vertices: [a, b] }) => {
+    for (const [from, to] of [[a, b], [b, a]] as const) {
+      if (visited.has(`${from}:${to}`)) continue;
+      const face = walk(from, to);
+      if (face.length >= 3 && signedArea(face, vertices) > 1e-12) faces.push(face);
+    }
+  });
+  return faces;
+}
+
+function stableEdgeId(vertices: Point[], [a, b]: [number, number]) {
+  const points = [vertices[a], vertices[b]]
+    .map(([x, y]) => `${round(x, 9)},${round(y, 9)}`)
+    .sort();
+  return `edge-${hashString(points.join(":")).toString(16).padStart(8, "0")}`;
+}
+
 export function candidateToSvg(candidate: Candidate, title: string) {
   const lines = candidate.edges.map((edge) => {
     const [from, to] = edge.vertices;
@@ -544,24 +656,60 @@ export function candidateToSvg(candidate: Candidate, title: string) {
 }
 
 export function candidateToFold(candidate: Candidate, title: string) {
+  const vertices: Point[] = candidate.vertices.map(([x, y]) => [
+    round(x / candidate.paper.width, 12),
+    round(1 - y / candidate.paper.height, 12),
+  ]);
+  const faces = facesFromPlanarGraph(
+    vertices,
+    candidate.edges.map((edge) => ({ ...edge, vertices: [...edge.vertices] as [number, number] })),
+  );
+  const edgeIds = candidate.edges.map((edge) => stableEdgeId(vertices, edge.vertices));
   const fold = {
     file_spec: 1.2,
-    file_creator: "Ito PJ 2026 browser prototype",
+    file_creator: "ORIAI COrigami-inspired final-state generator",
     file_title: `${title} — ${candidate.title}`,
     file_description:
-      "Single-vertex structure candidate. Local Kawasaki residual evaluated. Global flat-foldability, layer order, collision, paper thickness, and fold sequence are unverified.",
+      "COrigami-inspired single-vertex base candidate. Oriedita performs the independent 2D flat-fold check; later shaping stages are zero-thickness angle previews.",
     file_classes: ["singleModel"],
     frame_title: "Crease-pattern candidate",
     frame_classes: ["creasePattern"],
     frame_attributes: ["2D"],
     frame_unit: "unit",
-    vertices_coords: candidate.vertices.map(([x, y]) => [
-      round(x / candidate.paper.width, 12),
-      round(1 - y / candidate.paper.height, 12),
-    ]),
+    vertices_coords: vertices,
     edges_vertices: candidate.edges.map((edge) => edge.vertices),
     edges_assignment: candidate.edges.map((edge) => edge.assignment),
+    edges_foldAngle: candidate.edges.map((edge) =>
+      edge.assignment === "M" ? -180 : edge.assignment === "V" ? 180 : edge.assignment === "U" ? null : 0
+    ),
+    faces_vertices: faces,
+    "edges_oriai:id": edgeIds,
+    "edges_oriai:role": candidate.edges.map((edge) => edge.assignment === "B" ? "boundary" : "base_hinge"),
+    "edges_oriai:stage": candidate.edges.map(() => "base"),
     "edges_mitou:semanticPart": candidate.edges.map((edge) => edge.part),
+    "oriai:generator": {
+      family: "corigami_inspired_single_vertex_base",
+      version: 1,
+      candidateId: candidate.id,
+      semanticTree: candidate.semanticTree,
+      packing: {
+        adapter: "radial_single_vertex",
+        boxPleatPacking: "not_implemented",
+        flaps: candidate.rayAngles.map((angle, index) => ({
+          edgeId: edgeIds[candidate.edges.length - candidate.rayAngles.length + index],
+          angleDeg: round((angle * 180) / Math.PI, 3),
+          semanticPart: candidate.partLabels[index],
+        })),
+      },
+      semanticParts: [...new Set(candidate.partLabels)],
+      limitations: [
+        "restricted_single_vertex_family",
+        "zero_thickness_shaping_preview",
+        "collision_unchecked",
+        "paper_thickness_unchecked",
+        "fold_sequence_out_of_scope",
+      ],
+    },
     "mitou:localValidation": {
       scope: "singleVertexKawasakiAndMaekawaCounts",
       kawasakiResidualRad: round(candidate.residualRad, 14),

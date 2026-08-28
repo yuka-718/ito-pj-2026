@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { lstatSync } from "node:fs";
+import {
+  closeSync,
+  constants,
+  fsyncSync,
+  lstatSync,
+  openSync,
+  writeSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -156,6 +163,49 @@ export function inspectRestrictedToolRequest(request, {
   };
 }
 
+const ACTION_COORDINATE_SCALE = 1e6;
+
+function actionCoordinate(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return null;
+  const rounded = Math.round(number * ACTION_COORDINATE_SCALE);
+  return Object.is(rounded, -0) ? 0 : rounded;
+}
+
+export function restrictedActionKey(line) {
+  const color = typeof line?.color === "string" ? line.color.toUpperCase() : "";
+  if (color !== "MOUNTAIN" && color !== "VALLEY") return null;
+  const coordinates = [line?.ax, line?.ay, line?.bx, line?.by].map(actionCoordinate);
+  if (coordinates.some((value) => value == null)) return null;
+  const [ax, ay, bx, by] = coordinates;
+  const first = `${ax},${ay}`;
+  const second = `${bx},${by}`;
+  if (first === second) return null;
+  const [start, end] = first < second ? [first, second] : [second, first];
+  return `${color}:${start}:${end}`;
+}
+
+export function appendActionIntentWal(path, record) {
+  if (typeof path !== "string" || !isAbsolute(path)) {
+    throw new Error("action WAL path must be absolute");
+  }
+  const parent = inspectSymlinkFreePath(dirname(resolve(path)));
+  const leaf = inspectSymlinkFreePath(resolve(path), { allowMissingLeaf: true });
+  if (!parent.safe || !leaf.safe) throw new Error("action WAL path is not symlink-safe");
+  let descriptor;
+  try {
+    descriptor = openSync(
+      resolve(path),
+      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | (constants.O_NOFOLLOW ?? 0),
+      0o600,
+    );
+    writeSync(descriptor, `${JSON.stringify(record)}\n`);
+    fsyncSync(descriptor);
+  } finally {
+    if (descriptor != null) closeSync(descriptor);
+  }
+}
+
 function mappedPathReplacements(pathMappings) {
   return [...pathMappings.values()].map(({ logical_path: logicalPath, physical_path: physicalPath }) => ({
     logicalPath,
@@ -190,6 +240,10 @@ function startProxy() {
     allowedExportPaths: parseAllowedPaths(process.env.ORIAI_ORIEDITA_ALLOWED_EXPORT_PATHS),
     pathMappings: parsePathMappings(process.env.ORIAI_ORIEDITA_PATH_MAPPINGS),
   };
+  const actionWalPath = process.env.ORIAI_ORIEDITA_ACTION_WAL_PATH;
+  const actionBatch = Math.max(1, Number.parseInt(process.env.ORIAI_ORIEDITA_ACTION_BATCH ?? "1", 10) || 1);
+  const actionIterationOffset = Math.max(0, Number.parseInt(process.env.ORIAI_ORIEDITA_ACTION_ITERATION_OFFSET ?? "0", 10) || 0);
+  let actionSequence = 0;
   const child = spawn(process.execPath, [resolve(upstream)], {
     cwd: dirname(resolve(upstream)),
     env: restrictedUpstreamEnvironment(process.env),
@@ -232,9 +286,37 @@ function startProxy() {
         process.stdout.write(`${JSON.stringify(decision.response)}\n`);
         return;
       }
+      if (request?.method === "tools/call" && request?.params?.name === "add_line") {
+        const actionKey = restrictedActionKey(request.params.arguments);
+        if (!actionKey) throw new Error("add_line does not have a valid action key");
+        actionSequence += 1;
+        appendActionIntentWal(actionWalPath, {
+          schema: "oriai-codex-action-wal-v1",
+          phase: "intent",
+          batch: actionBatch,
+          batch_step: actionSequence,
+          step: actionIterationOffset + actionSequence,
+          action_key: actionKey,
+          arguments: request.params.arguments,
+          proxy_pid: process.pid,
+          recorded_at: new Date().toISOString(),
+        });
+      }
       forwardedLine = JSON.stringify(decision.request ?? request);
-    } catch {
-      // Let the upstream MCP server report malformed protocol messages.
+    } catch (error) {
+      try {
+        const request = JSON.parse(line);
+        if (request?.method === "tools/call" && request?.params?.name === "add_line") {
+          process.stdout.write(`${JSON.stringify({
+            jsonrpc: request?.jsonrpc ?? "2.0",
+            id: request?.id ?? null,
+            error: { code: -32603, message: `add_line action WAL failed: ${error instanceof Error ? error.message : error}` },
+          })}\n`);
+          return;
+        }
+      } catch {
+        // Let the upstream MCP server report malformed protocol messages.
+      }
     }
     child.stdin.write(`${forwardedLine}\n`);
   };

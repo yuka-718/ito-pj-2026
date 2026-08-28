@@ -61,9 +61,13 @@ test("connects to the dynamic Codex and Oriedita API and makes input errors visi
   assert.match(page, /resolveApiOrigin/);
   assert.match(page, /apiFetch\("\/jobs"/);
   assert.match(page, /waitForJob/);
-  assert.match(page, /\{result && \(\s*<section className="outputs"/);
+  assert.match(page, /result && hasReachedAppearanceTarget\(result\.evaluation\)/);
+  assert.match(page, /TARGET_APPEARANCE_SCORE/);
+  assert.doesNotMatch(page, /pipeline:\s*["']corigami_final_state_v1["']/);
   assert.match(server, /codex_mcp_loop/);
   assert.match(server, /runCodexOrieditaLoop/);
+  assert.match(server, /evaluationLimit = null/);
+  assert.match(server, /targetScore = 99/);
   assert.match(server, /ORI_AI_MAX_JOBS_PER_WINDOW \?\? "0"/);
   assert.match(server, /if \(maxJobsPerWindow === 0\) return;/);
   assert.match(envExample, /^ORI_AI_MAX_JOBS_PER_WINDOW=0$/m);

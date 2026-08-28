@@ -19,7 +19,6 @@ const logs = join(homedir(), "Library", "Logs", "ORI-AI");
 const plistPath = join(launchAgents, `${label}.plist`);
 const serverPath = join(projectRoot, "local-oriedita", "server.mjs");
 const applicationSupport = join(homedir(), "Library", "Application Support", "ORI-AI");
-const runtimeMcp = join(applicationSupport, "oriedita-mcp");
 const runtimeJar = join(applicationSupport, "oriedita.jar");
 const sourceRoot = process.env.ORIEDITA_SOURCE_ROOT ?? "/Users/yukaito/Documents/oriedita";
 const sourceMcp = join(sourceRoot, "oriedita-mcp");
@@ -58,11 +57,7 @@ await Promise.all([
   mkdir(logs, { recursive: true }),
   mkdir(applicationSupport, { recursive: true }),
 ]);
-await rm(runtimeMcp, { recursive: true, force: true });
-await Promise.all([
-  cp(sourceMcp, runtimeMcp, { recursive: true, force: true }),
-  cp(sourceJar, runtimeJar, { force: true }),
-]);
+await cp(sourceJar, runtimeJar, { force: true });
 
 const pathValue = [
   dirname(process.execPath),
@@ -94,8 +89,6 @@ const plist = `<?xml version="1.0" encoding="UTF-8"?>
     <string>${xml(pathValue)}</string>
     <key>ORI_AI_GROQ_MODEL</key>
     <string>qwen/qwen3.6-27b</string>
-    <key>ORI_AI_MAX_ITERATIONS</key>
-    <string>10</string>
     <key>ORI_AI_DESIGN_MODE</key>
     <string>codex_mcp_loop</string>
     <key>ORI_AI_CODEX_PATH</key>

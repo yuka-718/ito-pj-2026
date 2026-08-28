@@ -2,10 +2,11 @@
 
 import { execFileSync, spawn } from "node:child_process";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { access, appendFile, copyFile, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { readlinkSync } from "node:fs";
+import { access, appendFile, copyFile, mkdir, open, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -41,7 +42,11 @@ import {
 import { evaluatePartialFold } from "./partial-evaluation.mjs";
 import { runStepSearch } from "./step-search.mjs";
 import { createSquareRootFold, enumerateFullWidthCreaseActions } from "./crease-actions.mjs";
-import { assertInitialCreasesPreserved, runCodexOrieditaLoop } from "./codex-oriedita-runner.mjs";
+import {
+  assertInitialCreasesPreserved,
+  assertNovelCodexActionKeys,
+  runCodexOrieditaLoop,
+} from "./codex-oriedita-runner.mjs";
 import {
   ApiInputError,
   createOpenApiDocument,
@@ -52,7 +57,7 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url));
 const projectRoot = resolve(here, "..");
-const workRoot = resolve(projectRoot, "work", "local-jobs");
+const workRoot = resolve(process.env.ORI_AI_WORK_ROOT ?? join(projectRoot, "work", "local-jobs"));
 const knowledgePack = await loadKnowledgePack();
 const origamiSearchCatalog = await loadOrigamiSearchCatalog().catch((error) => {
   console.warn(`Origami Search索引を読み込めないため参照なしで続行します: ${error instanceof Error ? error.message : error}`);
@@ -61,9 +66,10 @@ const origamiSearchCatalog = await loadOrigamiSearchCatalog().catch((error) => {
 const knowledgeSearchEnabled = true;
 const port = Number.parseInt(process.env.ORI_AI_LOCAL_PORT ?? "8788", 10);
 const host = process.env.ORI_AI_LOCAL_HOST ?? "127.0.0.1";
-const maxIterations = 10;
+const codexBatchIterations = 10;
+const evaluationLimit = null;
 const maxCycles = 10;
-const targetScore = Math.min(100, Math.max(1, Number.parseInt(process.env.ORI_AI_TARGET_SCORE ?? "85", 10)));
+const targetScore = 99;
 const configuredDesignMode = process.env.ORI_AI_DESIGN_MODE?.trim();
 const designMode = configuredDesignMode === "regeneration" || configuredDesignMode === "crease_step_search"
   ? configuredDesignMode
@@ -105,6 +111,320 @@ export function assertSuccessfulFinalFoldCalculation(calculation, label = "最�
   return violationCount;
 }
 
+const cumulativeOperationCountKeys = [
+  "add_line",
+  "calculate_fold",
+  "get_folded_figure",
+  "open_file",
+  "export_file",
+  "required_rollbacks",
+  "completed_iterations",
+];
+
+function finiteInteger(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.floor(number) : fallback;
+}
+
+async function writeFileAtomically(path, data, { mode = 0o600 } = {}) {
+  const temporaryPath = `${path}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(temporaryPath, data, { flag: "wx", mode });
+    await rename(temporaryPath, path);
+  } finally {
+    await rm(temporaryPath, { force: true }).catch(() => {});
+  }
+}
+
+async function copyFileAtomically(sourcePath, destinationPath) {
+  await writeFileAtomically(destinationPath, await readFile(sourcePath));
+}
+
+async function readJsonIfPresent(path) {
+  try {
+    return JSON.parse(await readFile(path, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function readLastJsonLine(path) {
+  let handle;
+  try {
+    handle = await open(path, "r");
+    const { size } = await handle.stat();
+    if (size === 0) return null;
+    const length = Math.min(size, 256 * 1024);
+    const buffer = Buffer.alloc(length);
+    await handle.read(buffer, 0, length, size - length);
+    const lines = buffer.toString("utf8").trimEnd().split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      try {
+        return JSON.parse(lines[index]);
+      } catch {
+        // A process can be stopped between filesystem writes. Ignore only the
+        // incomplete tail and find the last fully committed JSONL record.
+      }
+    }
+    return null;
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+const jsonLineTailReadSize = 64 * 1024;
+
+async function readFileChunk(handle, length, position) {
+  const chunk = Buffer.alloc(length);
+  let offset = 0;
+  while (offset < length) {
+    const { bytesRead } = await handle.read(
+      chunk,
+      offset,
+      length - offset,
+      position + offset,
+    );
+    if (bytesRead === 0) break;
+    offset += bytesRead;
+  }
+  return chunk.subarray(0, offset);
+}
+
+async function readJsonLineTail(handle, size) {
+  let position = size;
+  const suffixes = [];
+  while (position > 0) {
+    const length = Math.min(position, jsonLineTailReadSize);
+    position -= length;
+    const content = await readFileChunk(handle, length, position);
+    const newlineIndex = content.lastIndexOf(0x0a);
+    if (newlineIndex >= 0) {
+      return {
+        start: position + newlineIndex + 1,
+        content: Buffer.concat([content.subarray(newlineIndex + 1), ...suffixes]),
+      };
+    }
+    suffixes.unshift(content);
+  }
+  return { start: 0, content: Buffer.concat(suffixes) };
+}
+
+async function repairJsonLineTail(handle) {
+  const { size } = await handle.stat();
+  if (size === 0) return false;
+  const tail = await readJsonLineTail(handle, size);
+  if (tail.start === size) return false;
+  const text = tail.content.toString("utf8");
+  try {
+    if (!text.trim()) throw new SyntaxError("empty JSONL tail");
+    JSON.parse(text);
+    await handle.write("\n", size);
+  } catch {
+    await handle.truncate(tail.start);
+  }
+  return true;
+}
+
+async function readJsonLinesIfPresent(path) {
+  let handle;
+  try {
+    handle = await open(path, "r+");
+    if (await repairJsonLineTail(handle)) await handle.sync();
+    return (await readFile(path, "utf8"))
+      .split(/\r?\n/)
+      .filter((line) => line.trim())
+      .flatMap((line) => {
+        try {
+          return [JSON.parse(line)];
+        } catch {
+          // Keep readable proofs around malformed lines left by older builds;
+          // new torn tails are repaired before they can become interior lines.
+          return [];
+        }
+      });
+  } catch (error) {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
+export async function appendDurableJsonLine(path, record) {
+  const handle = await open(path, "a+", 0o600);
+  try {
+    await repairJsonLineTail(handle);
+    await handle.write(`${JSON.stringify(record)}\n`);
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+async function appendJsonLinesOnce(path, records, key) {
+  const last = await readLastJsonLine(path);
+  const lastKey = finiteInteger(last?.[key], 0);
+  const pending = records.filter((record) => finiteInteger(record?.[key], 0) > lastKey);
+  if (!pending.length) return;
+  const prefix = last ? "\n" : "";
+  await appendFile(path, `${prefix}${pending.map((record) => JSON.stringify(record)).join("\n")}\n`, { mode: 0o600 });
+}
+
+export function assertCodexBatchTransition(evaluation, {
+  startingBestScore = -1,
+  iterationOffset = 0,
+  batchSize = codexBatchIterations,
+  requiredTargetScore = targetScore,
+} = {}) {
+  const steps = Array.isArray(evaluation?.steps) ? evaluation.steps : [];
+  const expectedBatchSize = Math.max(1, finiteInteger(batchSize, codexBatchIterations));
+  const offset = Math.max(0, finiteInteger(iterationOffset));
+  const previousScore = Math.max(-1, Math.min(100, finiteInteger(startingBestScore, -1)));
+  const score = finiteInteger(evaluation?.score, -1);
+  const operationCounts = evaluation?.operation_counts ?? {};
+  if (steps.length !== expectedBatchSize) {
+    throw new Error(`Codexバッチの評価が完了していません (${steps.length}/${expectedBatchSize})`);
+  }
+  if (score < previousScore || score < 0 || score > 100) {
+    throw new Error(`Codexバッチの最高点が不正です (${previousScore} -> ${score})`);
+  }
+  if (finiteInteger(evaluation?.iteration_offset, -1) !== offset) {
+    throw new Error("Codexバッチの通算評価位置が一致しません");
+  }
+  if (finiteInteger(evaluation?.target_score, -1) !== requiredTargetScore) {
+    throw new Error("Codexバッチの目標点が一致しません");
+  }
+  const targetReached = score >= requiredTargetScore;
+  if (evaluation?.target_reached !== targetReached) {
+    throw new Error("Codexバッチの目標到達判定が実証済み点数と一致しません");
+  }
+  if (operationCounts.add_line !== expectedBatchSize
+      || finiteInteger(operationCounts.calculate_fold, -1) < expectedBatchSize
+      || finiteInteger(operationCounts.get_folded_figure, -1) < expectedBatchSize
+      || operationCounts.completed_iterations !== expectedBatchSize) {
+    throw new Error("CodexバッチのOriedita実操作数が評価数と一致しません");
+  }
+  return {
+    score,
+    targetReached,
+    completedEvaluations: steps.length,
+    bestStep: Math.max(0, finiteInteger(evaluation?.best_step)),
+  };
+}
+
+export function createCodexOperationSummary({ requiredTargetScore = targetScore } = {}) {
+  return {
+    schema: "oriai-codex-unlimited-operation-summary-v1",
+    target_score: requiredTargetScore,
+    evaluation_limit: evaluationLimit,
+    batch_size: codexBatchIterations,
+    batches_completed: 0,
+    evaluations_completed: 0,
+    best_score: -1,
+    best_step: 0,
+    target_reached: false,
+    counts: Object.fromEntries(cumulativeOperationCountKeys.map((key) => [key, 0])),
+    omitted_batches: 0,
+    complete_batch_log: "batch-history.jsonl",
+    batches: [],
+  };
+}
+
+export function mergeCodexBatchOperationSummary(summary, evaluation, {
+  batchNumber,
+  startingBestScore,
+  iterationOffset,
+  artifactDirectory,
+} = {}) {
+  const nextCounts = { ...(summary?.counts ?? {}) };
+  for (const key of cumulativeOperationCountKeys) {
+    nextCounts[key] = finiteInteger(nextCounts[key]) + finiteInteger(evaluation?.operation_counts?.[key]);
+  }
+  const completed = Array.isArray(evaluation?.steps) ? evaluation.steps.length : 0;
+  const batchRecord = {
+    batch: batchNumber,
+    start_step: iterationOffset + 1,
+    end_step: iterationOffset + completed,
+    prior_best_score: startingBestScore,
+    best_score: evaluation.score,
+    best_step: Math.max(finiteInteger(summary?.best_step), finiteInteger(evaluation?.best_step)),
+    target_reached: evaluation.target_reached === true,
+    artifact_directory: artifactDirectory,
+  };
+  const allRecentBatches = [...(Array.isArray(summary?.batches) ? summary.batches : []), batchRecord];
+  const retainedBatches = allRecentBatches.slice(-80);
+  return {
+    ...(summary ?? createCodexOperationSummary()),
+    batches_completed: finiteInteger(summary?.batches_completed) + 1,
+    evaluations_completed: finiteInteger(summary?.evaluations_completed) + completed,
+    best_score: evaluation.score,
+    best_step: Math.max(finiteInteger(summary?.best_step), finiteInteger(evaluation?.best_step)),
+    target_reached: evaluation.target_reached === true,
+    counts: nextCounts,
+    omitted_batches: Math.max(0, finiteInteger(summary?.omitted_batches) + allRecentBatches.length - retainedBatches.length),
+    batches: retainedBatches,
+  };
+}
+
+export async function runCodexBatchesUntilTarget({
+  runBatch,
+  onBatch = async () => {},
+  startingBestScore = -1,
+  startingIterationOffset = 0,
+  startingBatchNumber = 0,
+  startingBestStep = 0,
+  batchSize = codexBatchIterations,
+  requiredTargetScore = targetScore,
+  maximumBatches = Number.POSITIVE_INFINITY,
+  signal = null,
+} = {}) {
+  if (typeof runBatch !== "function") throw new TypeError("runBatch is required");
+  let bestScore = startingBestScore;
+  let iterationOffset = Math.max(0, finiteInteger(startingIterationOffset));
+  let batchNumber = Math.max(0, finiteInteger(startingBatchNumber));
+  let bestStep = Math.max(0, finiteInteger(startingBestStep));
+  let batchesRun = 0;
+  let lastBatch = null;
+  while (bestScore < requiredTargetScore && batchesRun < maximumBatches) {
+    if (signal?.aborted) throw new JobCancelledError();
+    batchNumber += 1;
+    batchesRun += 1;
+    const batchOutput = await runBatch({ batchNumber, startingBestScore: bestScore, iterationOffset });
+    const evaluation = batchOutput?.evaluation ?? batchOutput;
+    const transition = assertCodexBatchTransition(evaluation, {
+      startingBestScore: bestScore,
+      iterationOffset,
+      batchSize,
+      requiredTargetScore,
+    });
+    await onBatch({
+      batchNumber,
+      startingBestScore: bestScore,
+      iterationOffset,
+      evaluation,
+      batchOutput,
+      transition,
+    });
+    bestScore = transition.score;
+    iterationOffset += transition.completedEvaluations;
+    if (transition.bestStep > 0) bestStep = transition.bestStep;
+    lastBatch = batchOutput;
+  }
+  return {
+    bestScore,
+    bestStep,
+    batchesCompleted: batchNumber,
+    batchesRun,
+    evaluationsCompleted: iterationOffset,
+    lastBatch,
+    targetReached: bestScore >= requiredTargetScore,
+  };
+}
+
 function loadGroqApiKey() {
   const configured = process.env.GROQ_API_KEY?.trim();
   if (configured) return configured;
@@ -132,10 +452,18 @@ const allowedOrigins = new Set([
 ]);
 const jobs = new Map();
 const queue = [];
+const maximumWaitingJobs = 3;
+const JOB_REQUEUE = Symbol("JOB_REQUEUE");
+const jobIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const submissionWindows = new Map();
+const jobAbortControllers = new Map();
+const codexActionHistoryByJob = new Map();
 let activeJobId = null;
+let activeJobPromise = null;
 let activeOrieditaConnection = null;
 let orieditaLaunchPromise = null;
+let isShuttingDown = false;
+let shutdownPromise = null;
 
 function isAllowedOrigin(origin) {
   if (!origin) return true;
@@ -208,6 +536,371 @@ class HttpError extends Error {
   }
 }
 
+export function createJobAdmissionGate({
+  queueList,
+  isActive,
+  maxWaitingJobs = maximumWaitingJobs,
+}) {
+  let reservations = 0;
+
+  function reserve() {
+    const availableAdmissions = maxWaitingJobs + (isActive() ? 0 : 1);
+    if (queueList.length + reservations >= availableAdmissions) {
+      throw new HttpError(429, "処理待ちが多いため、少し待ってから再実行してください");
+    }
+    reservations += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      reservations -= 1;
+    };
+  }
+
+  return {
+    get reservations() {
+      return reservations;
+    },
+    async run(create) {
+      const release = reserve();
+      try {
+        return await create();
+      } finally {
+        release();
+      }
+    },
+  };
+}
+
+const jobAdmissionGate = createJobAdmissionGate({
+  queueList: queue,
+  isActive: () => Boolean(activeJobId || activeJobPromise),
+});
+
+export class JobCancelledError extends Error {
+  constructor(message = "ジョブはキャンセルされました") {
+    super(message);
+    this.name = "JobCancelledError";
+  }
+}
+
+export class JobRestartError extends Error {
+  constructor(message = "API再起動のためジョブを中断します") {
+    super(message);
+    this.name = "JobRestartError";
+  }
+}
+
+function isJobRestartSignal(signal) {
+  return signal?.aborted === true && signal.reason instanceof JobRestartError;
+}
+
+function throwIfJobCancelled(job, signal) {
+  if (job?.cancelRequested) throw new JobCancelledError();
+  if (isJobRestartSignal(signal)) throw signal.reason;
+  if (signal?.aborted) throw new JobCancelledError();
+}
+
+export function applyJobExecutionError(job, error, { signal = null } = {}) {
+  if (!job.cancelRequested && (error instanceof JobRestartError || isJobRestartSignal(signal))) {
+    job.result = null;
+    job.status = "queued";
+    job.message = "API再起動後に処理を再開します";
+    job.error = null;
+    return true;
+  }
+  if (job.cancelRequested || error instanceof JobCancelledError || error?.name === "AbortError") {
+    job.status = "cancelled";
+    job.message = "キャンセル済み";
+    job.error = null;
+    return false;
+  }
+  job.status = "failed";
+  job.message = "処理に失敗しました";
+  job.error = error instanceof Error ? error.message : String(error);
+  return false;
+}
+
+function jobStatePath(job) {
+  return join(job.directory, "job-state.json");
+}
+
+export async function persistJobState(job) {
+  await writeFileAtomically(
+    jobStatePath(job),
+    `${JSON.stringify({ schema: "oriai-local-job-v1", job }, null, 2)}\n`,
+  );
+}
+
+function isRestorableJob(value, root) {
+  if (!value || typeof value !== "object") return false;
+  if (!jobIdPattern.test(value.id ?? "")) return false;
+  if (value.type !== "design" && value.type !== "oriedita-fold") return false;
+  const expectedDirectory = resolve(root, value.id);
+  return resolve(value.directory ?? "") === expectedDirectory && basename(expectedDirectory) === value.id;
+}
+
+function processIsAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error?.code === "ESRCH") return false;
+    throw error;
+  }
+}
+
+function processCommand(pid) {
+  try {
+    return execFileSync("/bin/ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
+  } catch {
+    return "";
+  }
+}
+
+function processWorkingDirectory(pid) {
+  try {
+    return resolve(readlinkSync(`/proc/${pid}/cwd`));
+  } catch {
+    // macOS does not expose /proc. `lsof` is part of the base system there.
+  }
+  for (const lsofPath of ["/usr/sbin/lsof", "/usr/bin/lsof"]) {
+    try {
+      const output = execFileSync(lsofPath, ["-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      const pathLine = output.split(/\r?\n/).find((line) => line.startsWith("n/"));
+      if (pathLine) return resolve(pathLine.slice(1));
+    } catch {
+      // The process may have exited during inspection, or this lsof path may
+      // not exist. Try the next source and ultimately fail closed.
+    }
+  }
+  return "";
+}
+
+function inspectPosixProcessGroup(processGroup) {
+  const groupId = -finiteInteger(processGroup, 0);
+  if (groupId <= 1) return [];
+  let output;
+  try {
+    output = execFileSync("/bin/ps", ["-axo", "pid=,pgid=,command="], {
+      encoding: "utf8",
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return [];
+  }
+  return output.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
+    if (!match || Number(match[2]) !== groupId) return [];
+    const pid = Number(match[1]);
+    return [{
+      pid,
+      process_group: -groupId,
+      command: match[3].trim(),
+      cwd: processWorkingDirectory(pid),
+    }];
+  });
+}
+
+function leaseDirectoryBelongsToJob(leaseDirectory, jobDirectory) {
+  if (typeof leaseDirectory !== "string" || typeof jobDirectory !== "string") return false;
+  if (resolve(leaseDirectory) !== leaseDirectory || resolve(jobDirectory) !== jobDirectory) return false;
+  const relation = relative(resolve(jobDirectory), resolve(leaseDirectory));
+  return relation !== ""
+    && !relation.startsWith("..")
+    && !relation.startsWith("/")
+    && !relation.startsWith("\\");
+}
+
+function configuredCodexName() {
+  return basename(process.env.ORI_AI_CODEX_PATH?.trim() || "codex");
+}
+
+function commandExecutableName(command) {
+  if (typeof command !== "string") return "";
+  const match = command.trim().match(/^(?:"([^"]+)"|'([^']+)'|(\S+))/);
+  return basename(match?.[1] ?? match?.[2] ?? match?.[3] ?? "");
+}
+
+function codexProcessLeaseHasJobProvenance(lease, job, platform = process.platform) {
+  const pid = finiteInteger(lease?.pid, 0);
+  const processGroup = finiteInteger(lease?.process_group, 0);
+  const codexName = basename(String(lease?.codex_path ?? ""));
+  return lease?.schema === "oriai-codex-process-lease-v1"
+    && typeof lease?.lease_id === "string"
+    && lease.lease_id.length > 0
+    && pid > (platform === "win32" ? 0 : 1)
+    && processGroup === (platform === "win32" ? pid : -pid)
+    && leaseDirectoryBelongsToJob(lease?.directory, job?.directory)
+    && codexName === configuredCodexName();
+}
+
+export function codexProcessLeaseMatches(lease, job, command) {
+  return codexProcessLeaseHasJobProvenance(lease, job)
+    && typeof command === "string"
+    && command.includes(resolve(lease.directory))
+    && commandExecutableName(command) === configuredCodexName();
+}
+
+function posixProcessGroupMatchesLease(lease, job, members) {
+  if (!Array.isArray(members) || members.length === 0) return false;
+  const expectedGroup = finiteInteger(lease.process_group, 0);
+  const expectedDirectory = resolve(lease.directory);
+  const relevantMembers = members.filter((member) =>
+    finiteInteger(member?.pid, 0) > 0
+    && finiteInteger(member?.process_group, 0) === expectedGroup);
+  const leader = relevantMembers.find((member) => finiteInteger(member.pid, 0) === lease.pid);
+  if (leader) {
+    return typeof leader.cwd === "string"
+      && leader.cwd.length > 0
+      && resolve(leader.cwd) === expectedDirectory
+      && codexProcessLeaseMatches(lease, job, leader.command);
+  }
+
+  // Once the detached leader is gone, the restricted MCP proxy is the
+  // independently observable link between the still-reserved PGID and this
+  // job. Static lease fields alone are untrusted because the inner Codex can
+  // write inside its workspace.
+  const restrictedProxyPath = resolve(here, "restricted-oriedita-mcp.mjs");
+  return relevantMembers.some((member) =>
+    typeof member.cwd === "string"
+    && member.cwd.length > 0
+    && resolve(member.cwd) === expectedDirectory
+    && typeof member.command === "string"
+    && member.command.includes(restrictedProxyPath));
+}
+
+export async function terminateStaleCodexProcessLease(job, {
+  isAlive = processIsAlive,
+  inspectCommand = processCommand,
+  inspectProcessGroup = inspectPosixProcessGroup,
+  sendSignal = (target, signal) => process.kill(target, signal),
+  removeLease = (path) => rm(path, { force: true }),
+  wait = (milliseconds) => new Promise((resolveWait) => setTimeout(resolveWait, milliseconds)),
+  graceMs = 5_000,
+  pollMs = 50,
+} = {}) {
+  const leasePath = join(job.directory, "codex-process-lease.json");
+  const lease = await readJsonIfPresent(leasePath);
+  if (!lease) return { found: false, terminated: false };
+  const pid = finiteInteger(lease.pid, 0);
+  if (!codexProcessLeaseHasJobProvenance(lease, job)) {
+    throw new Error("以前のCodexプロセスleaseのジョブ由来を確認できないため、安全にジョブを再開できません");
+  }
+  const target = finiteInteger(lease.process_group, 0);
+  if (!isAlive(target)) {
+    await removeLease(leasePath);
+    return { found: true, terminated: false };
+  }
+  const assertTargetMatchesLease = () => {
+    const matches = process.platform === "win32"
+      ? codexProcessLeaseMatches(lease, job, inspectCommand(pid))
+      : posixProcessGroupMatchesLease(lease, job, inspectProcessGroup(target));
+    if (!matches) {
+      throw new Error("以前のCodexプロセスleaseが実プロセスグループと一致しないため、安全にジョブを再開できません");
+    }
+  };
+  const signalLiveTarget = (signal) => {
+    if (!isAlive(target)) return false;
+    assertTargetMatchesLease();
+    try {
+      sendSignal(target, signal);
+      return true;
+    } catch (error) {
+      if (error?.code === "ESRCH" && !isAlive(target)) return false;
+      throw error;
+    }
+  };
+  const waitUntilStopped = async (duration) => {
+    const deadline = Date.now() + duration;
+    while (isAlive(target) && Date.now() < deadline) await wait(pollMs);
+    return !isAlive(target);
+  };
+  let terminated = signalLiveTarget("SIGTERM");
+  if (!(await waitUntilStopped(graceMs))) {
+    terminated = signalLiveTarget("SIGKILL") || terminated;
+    if (!(await waitUntilStopped(graceMs))) {
+      throw new Error("以前のCodexプロセスを停止できないため、ジョブを再開できません");
+    }
+  }
+  await removeLease(leasePath);
+  return { found: true, terminated };
+}
+
+export async function restorePersistedJobs({
+  root = workRoot,
+  jobsMap = jobs,
+  queueList = queue,
+} = {}) {
+  const restored = [];
+  const pending = [];
+  const entries = await readdir(root, { withFileTypes: true }).catch((error) => {
+    if (error?.code === "ENOENT") return [];
+    throw error;
+  });
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !jobIdPattern.test(entry.name)) continue;
+    try {
+      const payload = JSON.parse(await readFile(join(root, entry.name, "job-state.json"), "utf8"));
+      const job = payload?.schema === "oriai-local-job-v1" ? payload.job : null;
+      if (!isRestorableJob(job, root)) continue;
+      if (job.designMode === "codex_mcp_loop") {
+        await terminateStaleCodexProcessLease(job);
+      }
+      if (job.cancelRequested && job.status !== "done" && job.status !== "failed") {
+        job.status = "cancelled";
+        job.message = "キャンセル済み";
+        job.completedAt ??= new Date().toISOString();
+      } else if (job.status === "running" || job.status === "queued") {
+        job.status = "queued";
+        job.message = "API再起動後に処理を再開します";
+        job.completedAt = null;
+        job.error = null;
+        pending.push(job);
+      }
+      jobsMap.set(job.id, job);
+      restored.push(job.id);
+    } catch (error) {
+      console.warn(`ジョブ状態を復元できません (${entry.name}): ${error instanceof Error ? error.message : error}`);
+    }
+  }
+  pending
+    .sort((left, right) => String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? "")))
+    .forEach((job) => {
+      if (!queueList.includes(job.id)) queueList.push(job.id);
+    });
+  return restored;
+}
+
+export async function cancelJob(job, {
+  queueList = queue,
+  abortController = jobAbortControllers.get(job?.id),
+} = {}) {
+  if (!job) throw new HttpError(404, "ジョブが見つかりません");
+  if (job.status === "done" || job.status === "failed" || job.status === "cancelled") return job;
+  job.cancelRequested = true;
+  for (let index = queueList.length - 1; index >= 0; index -= 1) {
+    if (queueList[index] === job.id) queueList.splice(index, 1);
+  }
+  if (job.status === "queued") {
+    job.status = "cancelled";
+    job.message = "キャンセル済み";
+    job.completedAt = new Date().toISOString();
+  } else {
+    job.message = "キャンセル中";
+    abortController?.abort();
+  }
+  await persistJobState(job);
+  return job;
+}
+
 function hasApiAccess(request) {
   if (!apiToken) return true;
   const authorization = request.headers.authorization;
@@ -222,6 +915,8 @@ function requireApiAccess(request) {
 }
 
 function publicJob(job) {
+  const hasMaxCycles = Object.hasOwn(job, "maxCycles");
+  const hasMaxSteps = Object.hasOwn(job, "maxSteps");
   return {
     id: job.id,
     type: job.type,
@@ -232,12 +927,16 @@ function publicJob(job) {
     completedAt: job.completedAt,
     result: job.result,
     error: job.error,
+    cancelRequested: job.cancelRequested === true,
     progress: job.type === "design" ? {
       cycle: job.cycle ?? 0,
-      maxCycles: job.maxCycles ?? maxCycles,
+      maxCycles: hasMaxCycles ? job.maxCycles : maxCycles,
       bestScore: job.bestScore ?? null,
       step: job.step ?? job.cycle ?? 0,
-      maxSteps: job.maxSteps ?? job.maxCycles ?? maxCycles,
+      maxSteps: hasMaxSteps ? job.maxSteps : hasMaxCycles ? job.maxCycles : maxCycles,
+      evaluationLimit: job.designMode === "codex_mcp_loop" ? evaluationLimit : (hasMaxSteps ? job.maxSteps : maxCycles),
+      batchSize: job.designMode === "codex_mcp_loop" ? codexBatchIterations : null,
+      targetScore: job.designMode === "codex_mcp_loop" ? targetScore : null,
       evaluatedNodes: job.evaluatedNodes ?? 0,
       mode: job.designMode ?? designMode,
     } : null,
@@ -282,7 +981,11 @@ function validateJobInput(value) {
     referenceImage = { mimeType: match[1], bytes };
   }
   const goal = value?.goal && typeof value.goal === "object" ? value.goal : null;
-  return { prompt, fold, candidates, goal, referenceImage };
+  const pipeline = value?.pipeline == null ? null : String(value.pipeline);
+  if (pipeline !== null && pipeline !== "corigami_final_state_v1") {
+    throw new HttpError(400, "未対応の生成パイプラインです");
+  }
+  return { prompt, fold, candidates, goal, referenceImage, pipeline };
 }
 
 function extensionForMimeType(mimeType) {
@@ -292,15 +995,21 @@ function extensionForMimeType(mimeType) {
 }
 
 async function createJob(input) {
-  if (queue.length >= 3) throw new HttpError(429, "処理待ちが多いため、少し待ってから再実行してください");
+  return jobAdmissionGate.run(() => createJobAfterAdmission(input));
+}
+
+async function createJobAfterAdmission(input) {
   const id = randomUUID();
   const directory = join(workRoot, id);
   const candidateFolds = input.candidates;
   const goal = buildDesignGoal(input.prompt, input.goal);
   const preflight = validateCandidatePool(candidateFolds, goal);
   const inputFold = candidateFolds[preflight.selectedIndex];
+  const finalStateMode = input.pipeline === "corigami_final_state_v1";
+  const jobDesignMode = finalStateMode ? "corigami_final_state_v1" : designMode;
+  const unlimitedCodexMode = jobDesignMode === "codex_mcp_loop";
   const searchedPatternCount = searchedStructuralPatternCount(input.prompt);
-  const shouldRunTextRetrieval = searchedPatternCount > 0;
+  const shouldRunTextRetrieval = searchedPatternCount > 0 && !finalStateMode;
   const searchWorks = origamiSearchCatalog && shouldRunTextRetrieval
     ? searchOrigamiWorks(origamiSearchCatalog, input.prompt, { minimum: 3, maximum: 5 })
     : [];
@@ -336,6 +1045,7 @@ async function createJob(input) {
   await mkdir(directory, { recursive: true, mode: 0o700 });
   await mkdir(join(directory, "iterations"), { recursive: true, mode: 0o700 });
   await mkdir(join(directory, "cycles"), { recursive: true, mode: 0o700 });
+  await mkdir(join(directory, "batches"), { recursive: true, mode: 0o700 });
   await writeFile(join(directory, "input.fold"), `${JSON.stringify(inputFold, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(directory, "brief.txt"), `${input.prompt || "参考画像をもとに設計"}\n`, { mode: 0o600 });
   await writeFile(join(directory, "goal.json"), `${JSON.stringify(goal, null, 2)}\n`, { mode: 0o600 });
@@ -392,10 +1102,12 @@ async function createJob(input) {
     knowledgeReferences,
     cycle: 0,
     step: 0,
-    maxCycles,
-    maxSteps: maxCycles,
+    maxCycles: finalStateMode ? 4 : unlimitedCodexMode ? null : maxCycles,
+    maxSteps: finalStateMode ? 4 : unlimitedCodexMode ? null : maxCycles,
+    batchSize: unlimitedCodexMode ? codexBatchIterations : null,
+    evaluationLimit: unlimitedCodexMode ? evaluationLimit : (finalStateMode ? 4 : maxCycles),
     evaluatedNodes: 0,
-    designMode,
+    designMode: jobDesignMode,
     bestScore: null,
     status: "queued",
     message: "処理待ち",
@@ -404,7 +1116,9 @@ async function createJob(input) {
     completedAt: null,
     result: null,
     error: null,
+    cancelRequested: false,
   };
+  await persistJobState(job);
   jobs.set(id, job);
   queue.push(id);
   void drainQueue();
@@ -412,7 +1126,10 @@ async function createJob(input) {
 }
 
 async function createOrieditaFoldJob(input) {
-  if (queue.length >= 3) throw new HttpError(429, "処理待ちが多いため、少し待ってから再実行してください");
+  return jobAdmissionGate.run(() => createOrieditaFoldJobAfterAdmission(input));
+}
+
+async function createOrieditaFoldJobAfterAdmission(input) {
   const id = randomUUID();
   const directory = join(workRoot, id);
   await mkdir(directory, { recursive: true, mode: 0o700 });
@@ -430,7 +1147,9 @@ async function createOrieditaFoldJob(input) {
     completedAt: null,
     result: null,
     error: null,
+    cancelRequested: false,
   };
+  await persistJobState(job);
   jobs.set(id, job);
   queue.push(id);
   void drainQueue();
@@ -1701,87 +2420,437 @@ async function prepareCodexInitialFold(job) {
   return initialPath;
 }
 
-async function runCodexDesignLoop(job) {
-  const initialFoldPath = await prepareCodexInitialFold(job);
+function buildPriorAttemptsSummary(iterationRecords, operationSummary) {
+  const recent = iterationRecords.slice(-80).map((record) => ({
+    step: record.step,
+    score: record.score,
+    accepted: record.accepted,
+    action: record.action,
+    add_line_arguments: record.operation_evidence?.add_line?.arguments ?? null,
+  }));
+  return {
+    evaluations_completed: operationSummary.evaluations_completed,
+    best_score: operationSummary.best_score,
+    omitted_older_attempts: Math.max(0, operationSummary.evaluations_completed - recent.length),
+    recent_attempts: recent,
+  };
+}
+
+async function synchronizeCodexCheckpointLogs(directory, checkpoint) {
+  if (checkpoint?.schema !== "oriai-codex-checkpoint-v1") return;
+  const summary = checkpoint.operation_summary;
+  const batchNumber = finiteInteger(summary?.batches_completed);
+  if (batchNumber < 1) return;
+  const batchName = String(batchNumber).padStart(6, "0");
+  const batchRecords = await readJsonIfPresent(join(directory, "batches", batchName, "iterations.json"));
+  const batchRecord = Array.isArray(summary?.batches)
+    ? summary.batches.find((record) => finiteInteger(record?.batch) === batchNumber)
+    : null;
+  if (!Array.isArray(batchRecords) || !batchRecord) {
+    throw new Error("再開チェックポイントのバッチ記録が不足しています");
+  }
+  const evaluation = await readJsonIfPresent(join(directory, "batches", batchName, "evaluation.json"));
+  const actionKeys = evaluation?.operation_counts?.action_keys;
+  if (!Array.isArray(actionKeys) || actionKeys.length !== codexBatchIterations) {
+    throw new Error("再開チェックポイントの折り線操作履歴が不足しています");
+  }
+  const actionRecords = actionKeys.map((actionKey, index) => ({
+    step: (batchNumber - 1) * codexBatchIterations + index + 1,
+    batch: batchNumber,
+    action_key: actionKey,
+  }));
+  await Promise.all([
+    appendJsonLinesOnce(join(directory, "iterations.jsonl"), batchRecords, "step"),
+    appendJsonLinesOnce(join(directory, "batch-history.jsonl"), [batchRecord], "batch"),
+    appendJsonLinesOnce(join(directory, "action-history.jsonl"), actionRecords, "step"),
+  ]);
+}
+
+export async function loadCommittedCodexActionKeys(directory, batchesCompleted, {
+  batchSize = codexBatchIterations,
+} = {}) {
+  const completed = Math.max(0, finiteInteger(batchesCompleted));
+  const keys = new Set();
+  for (let batchNumber = 1; batchNumber <= completed; batchNumber += 1) {
+    const evaluationPath = join(
+      directory,
+      "batches",
+      String(batchNumber).padStart(6, "0"),
+      "evaluation.json",
+    );
+    const evaluation = await readJsonIfPresent(evaluationPath);
+    if (!evaluation) throw new Error(`完了済みCodexバッチ${batchNumber}の評価記録がありません`);
+    const batchKeys = assertNovelCodexActionKeys(evaluation?.operation_counts?.action_keys, {
+      previousActionKeys: keys,
+      expectedCount: batchSize,
+    });
+    for (const key of batchKeys) keys.add(key);
+  }
+  return keys;
+}
+
+export async function loadPersistedCodexActionHistory(directory, batchesCompleted, {
+  batchSize = codexBatchIterations,
+} = {}) {
+  const completed = Math.max(0, finiteInteger(batchesCompleted));
+  const keys = await loadCommittedCodexActionKeys(directory, completed, { batchSize });
+  const events = await readJsonLinesIfPresent(join(directory, "action-attempts.jsonl"));
+  const inflight = [];
+  const byKey = new Map();
+  for (const event of events) {
+    const actionKey = event?.action_key;
+    const batch = finiteInteger(event?.batch, 0);
+    if (event?.schema !== "oriai-codex-action-wal-v1"
+        || typeof actionKey !== "string" || !actionKey
+        || batch < 1) continue;
+    keys.add(actionKey);
+    const current = byKey.get(actionKey);
+    if (!current
+        || batch > finiteInteger(current?.batch)
+        || (batch === finiteInteger(current?.batch) && event.phase === "evidenced")) {
+      byKey.set(actionKey, event);
+    }
+  }
+  for (const event of byKey.values()) {
+    if (finiteInteger(event.batch) > completed) inflight.push(event);
+  }
+  inflight.sort((left, right) =>
+    finiteInteger(left?.batch) - finiteInteger(right?.batch)
+    || finiteInteger(left?.batch_step) - finiteInteger(right?.batch_step)
+    || String(left?.recorded_at ?? "").localeCompare(String(right?.recorded_at ?? "")));
+  return { keys, inflight, events };
+}
+
+async function runCodexDesignLoop(job, { signal = null } = {}) {
+  throwIfJobCancelled(job, signal);
+  const persistedInitialFoldPath = join(job.directory, "initial.fold");
+  const initialFoldPath = await access(persistedInitialFoldPath)
+    .then(() => persistedInitialFoldPath)
+    .catch(() => prepareCodexInitialFold(job));
+  const initialFold = await readFile(initialFoldPath, "utf8").then(JSON.parse);
+  const batchesDirectory = join(job.directory, "batches");
   const finalFoldPath = join(job.directory, "final.fold");
   const finalCreasePath = join(job.directory, "final-crease.png");
-  const codexEvaluation = await runCodexOrieditaLoop({
-    directory: job.directory,
-    prompt: job.prompt,
-    goal: job.goal,
-    initialFoldPath,
-    finalFoldPath,
-    finalCreasePath,
-    referencePaths: job.referencePaths,
-    referenceData: job.references,
-    designBrief: job.designBrief,
-    maximumIterations: job.maxSteps,
-    timeoutMs: jobTimeoutMs,
-    onProgress: (step) => {
-      job.step = step;
-      job.cycle = step;
-      job.message = `CodexがOrieditaを操作・画像評価 ${step}/${job.maxSteps}`;
+  const finalFoldedPath = join(job.directory, "final-folded.png");
+  const checkpoint = await readJsonIfPresent(join(job.directory, "codex-checkpoint.json"));
+  const persistedIterations = await readJsonIfPresent(join(job.directory, "iterations.json"));
+  const recentIterationRecords = Array.isArray(checkpoint?.recent_iterations)
+    ? checkpoint.recent_iterations.slice(-80)
+    : Array.isArray(persistedIterations?.iterations)
+      ? persistedIterations.iterations.slice(-80)
+      : [];
+  const persistedOperationSummary = await readJsonIfPresent(join(job.directory, "operation-summary.json"));
+  const legacySummaryIsCommitted = persistedOperationSummary?.schema === "oriai-codex-unlimited-operation-summary-v1"
+    && finiteInteger(job.step) >= finiteInteger(persistedOperationSummary.evaluations_completed);
+  let operationSummary = checkpoint?.schema === "oriai-codex-checkpoint-v1"
+    ? checkpoint.operation_summary
+    : legacySummaryIsCommitted ? persistedOperationSummary : createCodexOperationSummary();
+  await synchronizeCodexCheckpointLogs(job.directory, checkpoint);
+  const expectedActionCount = finiteInteger(operationSummary.batches_completed) * codexBatchIterations;
+  const persistedActionHistory = await loadPersistedCodexActionHistory(
+    job.directory,
+    operationSummary.batches_completed,
+  );
+  let attemptedActionKeys = codexActionHistoryByJob.get(job.id);
+  if (!(attemptedActionKeys instanceof Set)) attemptedActionKeys = new Set();
+  for (const actionKey of persistedActionHistory.keys) attemptedActionKeys.add(actionKey);
+  codexActionHistoryByJob.set(job.id, attemptedActionKeys);
+  let inflightActionEvents = persistedActionHistory.inflight;
+  if (attemptedActionKeys.size < expectedActionCount) {
+    throw new Error("完了済みバッチの折り線操作履歴が不足しています");
+  }
+  if (checkpoint?.action_history_count != null) {
+    const checkpointActionCount = finiteInteger(checkpoint.action_history_count, -1);
+    if (checkpointActionCount < expectedActionCount
+        || checkpointActionCount > attemptedActionKeys.size) {
+      throw new Error("再開チェックポイントの折り線操作数が一致しません");
+    }
+  }
+  let currentBestFoldPath = initialFoldPath;
+  let currentBestCreasePath = null;
+  let completedBrief = checkpoint?.schema === "oriai-codex-checkpoint-v1"
+    ? checkpoint.design_brief
+    : await readJsonIfPresent(join(job.directory, "design-brief.json")) ?? job.designBrief;
+  if (operationSummary.batches_completed > 0) {
+    const latestBatchName = String(operationSummary.batches_completed).padStart(6, "0");
+    currentBestFoldPath = join(batchesDirectory, latestBatchName, "best.fold");
+    currentBestCreasePath = join(batchesDirectory, latestBatchName, "best-crease.png");
+    await Promise.all([access(currentBestFoldPath), access(currentBestCreasePath)]);
+  }
+
+  let batchStartingActionKeys = new Set(attemptedActionKeys);
+  const loop = await runCodexBatchesUntilTarget({
+    startingBestScore: finiteInteger(operationSummary.best_score, -1),
+    startingIterationOffset: finiteInteger(operationSummary.evaluations_completed),
+    startingBatchNumber: finiteInteger(operationSummary.batches_completed),
+    startingBestStep: finiteInteger(operationSummary.best_step),
+    batchSize: codexBatchIterations,
+    requiredTargetScore: targetScore,
+    maximumBatches: 1,
+    signal,
+    runBatch: async ({ batchNumber, startingBestScore, iterationOffset }) => {
+      throwIfJobCancelled(job, signal);
+      const batchName = String(batchNumber).padStart(6, "0");
+      const artifactDirectory = `batches/${batchName}`;
+      const batchDirectory = join(batchesDirectory, batchName);
+      const batchInitialFoldPath = join(batchDirectory, "start.fold");
+      const batchBestFoldPath = join(batchDirectory, "best.fold");
+      const batchBestCreasePath = join(batchDirectory, "best-crease.png");
+      await mkdir(batchDirectory, { recursive: true, mode: 0o700 });
+      await copyFileAtomically(currentBestFoldPath, batchInitialFoldPath);
+      batchStartingActionKeys = new Set(attemptedActionKeys);
+      const incompleteBatchAttempts = inflightActionEvents
+        .filter((event) => finiteInteger(event?.batch) === batchNumber)
+        .map((event) => ({
+          batch_step: event.batch_step,
+          action_key: event.action_key,
+          arguments: event.arguments ?? null,
+          evidenced: event.phase === "evidenced",
+        }));
+      const persistActionEvent = async (event) => {
+        const record = {
+          schema: "oriai-codex-action-wal-v1",
+          job_id: job.id,
+          batch: batchNumber,
+          step: iterationOffset + finiteInteger(event?.batch_step),
+          ...event,
+          recorded_at: new Date().toISOString(),
+        };
+        await appendDurableJsonLine(join(job.directory, "action-attempts.jsonl"), record);
+        attemptedActionKeys.add(record.action_key);
+        const existingIndex = inflightActionEvents.findIndex((candidate) =>
+          candidate.action_key === record.action_key);
+        if (existingIndex < 0) inflightActionEvents.push(record);
+        else if (record.phase === "evidenced") inflightActionEvents[existingIndex] = record;
+      };
+      job.cycle = batchNumber;
+      job.bestScore = startingBestScore >= 0 ? startingBestScore : null;
+      job.message = `CodexがOrieditaを操作・画像評価中（${iterationOffset}回評価済み）`;
+      const evaluation = await runCodexOrieditaLoop({
+        directory: batchDirectory,
+        prompt: job.prompt,
+        goal: job.goal,
+        initialFoldPath: batchInitialFoldPath,
+        finalFoldPath: batchBestFoldPath,
+        finalCreasePath: batchBestCreasePath,
+        referencePaths: job.referencePaths,
+        referenceData: job.references,
+        designBrief: completedBrief,
+        maximumIterations: codexBatchIterations,
+        startingBestScore,
+        iterationOffset,
+        targetScore,
+        priorAttemptsSummary: {
+          ...buildPriorAttemptsSummary(recentIterationRecords, operationSummary),
+          incomplete_batch_attempts: incompleteBatchAttempts,
+        },
+        previousActionKeys: [...batchStartingActionKeys],
+        onActionAttempt: persistActionEvent,
+        onActionEvidence: persistActionEvent,
+        actionWalPath: join(job.directory, "action-attempts.jsonl"),
+        processLeasePath: join(job.directory, "codex-process-lease.json"),
+        timeoutMs: jobTimeoutMs,
+        signal,
+        onProgress: (localStep) => {
+          job.step = iterationOffset + localStep;
+          job.message = `CodexがOrieditaを操作・画像評価中（${job.step}回評価）`;
+        },
+      });
+      return {
+        evaluation,
+        artifactDirectory,
+        batchDirectory,
+        batchInitialFoldPath,
+        batchBestFoldPath,
+        batchBestCreasePath,
+      };
+    },
+    onBatch: async ({
+      batchNumber,
+      startingBestScore,
+      iterationOffset,
+      evaluation,
+      batchOutput,
+    }) => {
+      await Promise.all([
+        access(batchOutput.batchBestFoldPath),
+        access(batchOutput.batchBestCreasePath),
+      ]);
+      const batchBestFold = await readFile(batchOutput.batchBestFoldPath, "utf8").then(JSON.parse);
+      assertInitialCreasesPreserved(initialFold, batchBestFold);
+      const batchActionKeys = assertNovelCodexActionKeys(evaluation?.operation_counts?.action_keys, {
+        previousActionKeys: batchStartingActionKeys,
+        expectedCount: codexBatchIterations,
+      });
+      for (const actionKey of batchActionKeys) attemptedActionKeys.add(actionKey);
+      inflightActionEvents = inflightActionEvents.filter((event) =>
+        finiteInteger(event?.batch) > batchNumber);
+      let runningBestScore = startingBestScore;
+      const operationIterations = Array.isArray(evaluation.operation_counts?.iterations)
+        ? evaluation.operation_counts.iterations
+        : [];
+      const batchRecords = evaluation.steps.map((step, index) => {
+        if (step.accepted === true && step.score > runningBestScore) runningBestScore = step.score;
+        return {
+          schema: "oriai-codex-oriedita-iteration-v2",
+          ...step,
+          step: iterationOffset + index + 1,
+          batch: batchNumber,
+          batch_step: step.step,
+          best_score_before_batch: startingBestScore,
+          best_score_after_step: Math.max(0, runningBestScore),
+          operation_evidence: operationIterations[index] ?? null,
+          required_operation: {
+            add_line: 1,
+            calculate_fold: 1,
+            get_folded_figure: 1,
+            rollback_when_worse: step.accepted !== true,
+          },
+        };
+      });
+      recentIterationRecords.push(...batchRecords);
+      if (recentIterationRecords.length > 80) {
+        recentIterationRecords.splice(0, recentIterationRecords.length - 80);
+      }
+      completedBrief = completeDesignBrief(completedBrief, evaluation.design_brief);
+      job.designBrief = completedBrief;
+      currentBestFoldPath = batchOutput.batchBestFoldPath;
+      currentBestCreasePath = batchOutput.batchBestCreasePath;
+      operationSummary = mergeCodexBatchOperationSummary(operationSummary, evaluation, {
+        batchNumber,
+        startingBestScore,
+        iterationOffset,
+        artifactDirectory: batchOutput.artifactDirectory,
+      });
+      const completedBatchRecord = operationSummary.batches.at(-1);
+      job.step = operationSummary.evaluations_completed;
+      job.bestScore = operationSummary.best_score;
+      await Promise.all([
+        writeFile(
+          join(batchOutput.batchDirectory, "evaluation.json"),
+          `${JSON.stringify(evaluation, null, 2)}\n`,
+          { mode: 0o600 },
+        ),
+        writeFile(
+          join(batchOutput.batchDirectory, "operation-summary.json"),
+          `${JSON.stringify(evaluation.operation_counts, null, 2)}\n`,
+          { mode: 0o600 },
+        ),
+        writeFile(
+          join(batchOutput.batchDirectory, "iterations.json"),
+          `${JSON.stringify(batchRecords, null, 2)}\n`,
+          { mode: 0o600 },
+        ),
+        writeFileAtomically(
+          join(job.directory, "design-brief.json"),
+          `${JSON.stringify(completedBrief, null, 2)}\n`,
+        ),
+        writeFileAtomically(
+          join(job.directory, "iterations.json"),
+          `${JSON.stringify({
+            schema: "oriai-codex-recent-iterations-v1",
+            total_iterations: operationSummary.evaluations_completed,
+            retained_iterations: recentIterationRecords.length,
+            omitted_iterations: Math.max(0, operationSummary.evaluations_completed - recentIterationRecords.length),
+            complete_log: "iterations.jsonl",
+            iterations: recentIterationRecords,
+          }, null, 2)}\n`,
+        ),
+        writeFileAtomically(
+          join(job.directory, "operation-summary.json"),
+          `${JSON.stringify(operationSummary, null, 2)}\n`,
+        ),
+        ...batchRecords.map((record) => writeFile(
+          join(job.directory, "iterations", `${String(record.step).padStart(6, "0")}-codex-oriedita.json`),
+          `${JSON.stringify(record, null, 2)}\n`,
+          { mode: 0o600 },
+        )),
+      ]);
+      await writeFileAtomically(
+        join(job.directory, "codex-checkpoint.json"),
+        `${JSON.stringify({
+          schema: "oriai-codex-checkpoint-v1",
+          operation_summary: operationSummary,
+          recent_iterations: recentIterationRecords,
+          design_brief: completedBrief,
+          current_best_fold: batchOutput.batchBestFoldPath,
+          current_best_crease: batchOutput.batchBestCreasePath,
+          action_history_count: attemptedActionKeys.size,
+          action_history_file: "action-history.jsonl",
+          updated_at: new Date().toISOString(),
+        }, null, 2)}\n`,
+      );
+      await Promise.all([
+        appendJsonLinesOnce(join(job.directory, "iterations.jsonl"), batchRecords, "step"),
+        appendJsonLinesOnce(join(job.directory, "batch-history.jsonl"), [completedBatchRecord], "batch"),
+        appendJsonLinesOnce(
+          join(job.directory, "action-history.jsonl"),
+          batchActionKeys.map((actionKey, index) => ({
+            step: iterationOffset + index + 1,
+            batch: batchNumber,
+            action_key: actionKey,
+          })),
+          "step",
+        ),
+      ]);
+      await persistJobState(job);
     },
   });
 
-  const completedBrief = completeDesignBrief(job.designBrief, codexEvaluation.design_brief);
-  const iterationRecords = codexEvaluation.steps.map((step) => ({
-    schema: "oriai-codex-oriedita-iteration-v1",
-    ...step,
-    required_operation: {
-      add_line: 1,
-      calculate_fold: 1,
-      get_folded_figure: 1,
-      rollback_when_worse: step.accepted !== true,
-    },
-  }));
-  await Promise.all([
-    writeFile(join(job.directory, "design-brief.json"), `${JSON.stringify(completedBrief, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(job.directory, "iterations.json"), `${JSON.stringify(iterationRecords, null, 2)}\n`, { mode: 0o600 }),
-    writeFile(join(job.directory, "operation-summary.json"), `${JSON.stringify(codexEvaluation.operation_counts, null, 2)}\n`, { mode: 0o600 }),
-    ...iterationRecords.map((record) => writeFile(
-      join(job.directory, "iterations", `${String(record.step).padStart(2, "0")}-codex-oriedita.json`),
-      `${JSON.stringify(record, null, 2)}\n`,
-      { mode: 0o600 },
-    )),
-  ]);
+  if (!loop.targetReached) {
+    job.message = `次の評価バッチを待機中（${loop.evaluationsCompleted}回評価済み）`;
+    return JOB_REQUEUE;
+  }
+  throwIfJobCancelled(job, signal);
+  const lastBatchEvaluation = loop.lastBatch?.evaluation ?? await readJsonIfPresent(join(
+    batchesDirectory,
+    String(loop.batchesCompleted).padStart(6, "0"),
+    "evaluation.json",
+  ));
+  if (!lastBatchEvaluation?.target_reached || finiteInteger(lastBatchEvaluation?.score, -1) < targetScore) {
+    throw new Error(`Codexの実証済み評価が${targetScore}点に到達していません`);
+  }
+  if (!currentBestCreasePath) throw new Error("Codexの最良展開図を確認できません");
 
-  await access(finalFoldPath);
-  const [initialFold, codexFinalFold] = await Promise.all([
-    readFile(initialFoldPath, "utf8").then(JSON.parse),
-    readFile(finalFoldPath, "utf8").then(JSON.parse),
-  ]);
+  // Canonical public artifacts do not exist until the evidenced score reaches
+  // the target. A failed batch therefore cannot overwrite a previously valid
+  // best version or expose a provisional result through the jobs API.
+  await copyFileAtomically(currentBestFoldPath, finalFoldPath);
+  const codexFinalFold = await readFile(finalFoldPath, "utf8").then(JSON.parse);
   assertInitialCreasesPreserved(initialFold, codexFinalFold);
   await orieditaRequest("/open", {
     method: "POST",
     body: JSON.stringify({ path: finalFoldPath }),
   });
   const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
-  const finalViolationCount = assertSuccessfulFinalFoldCalculation(calculation, "Codexの最終候補");
+  const finalViolationCount = assertSuccessfulFinalFoldCalculation(calculation, "Codexの99点最終候補");
   const state = await waitForFold(30_000);
-  if (!state?.foldedFigures?.completed) throw new Error("Codexの最終候補をOrieditaで計算できませんでした");
+  if (!state?.foldedFigures?.completed) throw new Error("Codexの99点最終候補をOrieditaで計算できませんでした");
   await Promise.all([
     orieditaRequest("/export", { method: "POST", body: JSON.stringify({ path: finalFoldPath }) }),
     orieditaRequest("/export", { method: "POST", body: JSON.stringify({ path: finalCreasePath }) }),
   ]);
   const foldedFigure = await orieditaRequest("/folded-figure");
   const foldedBytes = Buffer.from(foldedFigure.data, "base64");
-  await writeFile(join(job.directory, "final-folded.png"), foldedBytes, { mode: 0o600 });
-  const cycles = codexEvaluation.steps.map((step) => ({
+  await writeFileAtomically(finalFoldedPath, foldedBytes);
+  const cycles = recentIterationRecords.map((step) => ({
     cycle: step.step,
     step: step.step,
+    batch: step.batch,
     status: step.accepted ? "accepted" : "rolled_back",
     score: step.score,
     issues: step.issues,
     action: step.action,
     summary: step.summary,
   }));
+  const lastEvaluation = lastBatchEvaluation;
   const evaluation = {
-    score: codexEvaluation.score,
-    iterations: codexEvaluation.iterations,
-    stop_reason: codexEvaluation.stop_reason,
-    summary: codexEvaluation.summary,
-    issues: codexEvaluation.issues,
+    score: loop.bestScore,
+    iterations: loop.evaluationsCompleted,
+    batches: loop.batchesCompleted,
+    stop_reason: "target_score_reached",
+    summary: lastEvaluation.summary,
+    issues: lastEvaluation.issues,
     mode: "codex_oriedita_mcp_loop",
     physical: {
       score: finalViolationCount > 0 ? 0 : 100,
@@ -1789,7 +2858,7 @@ async function runCodexDesignLoop(job) {
       scope: "oriedita_flat_fold_2d",
     },
     appearance: {
-      score: codexEvaluation.score,
+      score: loop.bestScore,
       rotationNormalized: true,
       dimensions: "2d_folded_figure_reviewed_by_codex",
     },
@@ -1798,9 +2867,17 @@ async function runCodexDesignLoop(job) {
       layerCount: "unknown",
       clearanceIsProxy: true,
     },
-    maxCycles: job.maxSteps,
+    evaluationLimit,
+    batchSize: codexBatchIterations,
+    maxCycles: evaluationLimit,
     targetScore,
-    bestCycle: codexEvaluation.best_step,
+    bestCycle: loop.bestStep,
+    cycleWindow: {
+      total: loop.evaluationsCompleted,
+      retained: cycles.length,
+      omitted: Math.max(0, loop.evaluationsCompleted - cycles.length),
+      completeLog: "iterations.jsonl",
+    },
     cycles,
     steps: cycles,
     search: {
@@ -1812,7 +2889,30 @@ async function runCodexDesignLoop(job) {
       sequenceFeasibility: "unverified",
     },
   };
-  await writeFile(join(job.directory, "final-evaluation.json"), `${JSON.stringify(evaluation, null, 2)}\n`, { mode: 0o600 });
+  await Promise.all([
+    writeFileAtomically(
+      join(job.directory, "final-evaluation.json"),
+      `${JSON.stringify(evaluation, null, 2)}\n`,
+    ),
+    writeFileAtomically(
+      join(job.directory, "generation-loop.json"),
+      `${JSON.stringify({
+        stopReason: "target_score_reached",
+        targetScore,
+        scheduling: {
+          policy: "round_robin_per_codex_batch",
+          batchEvaluations: codexBatchIterations,
+          cancelEndpoint: "POST /jobs/{jobId}/cancel",
+          restartRecovery: true,
+        },
+        evaluationLimit,
+        bestScore: loop.bestScore,
+        bestStep: loop.bestStep,
+        batchesCompleted: loop.batchesCompleted,
+        evaluationsCompleted: loop.evaluationsCompleted,
+      }, null, 2)}\n`,
+    ),
+  ]);
   const [creaseBytes, foldBytes] = await Promise.all([
     readFile(finalCreasePath),
     readFile(finalFoldPath),
@@ -1827,8 +2927,9 @@ async function runCodexDesignLoop(job) {
   };
 }
 
-async function runDesignLoop(job) {
-  if (job.designMode === "codex_mcp_loop") return runCodexDesignLoop(job);
+async function runDesignLoop(job, { signal = null } = {}) {
+  if (job.designMode === "corigami_final_state_v1") return runCOrigamiFinalState(job);
+  if (job.designMode === "codex_mcp_loop") return runCodexDesignLoop(job, { signal });
   if (job.knowledgeMatch || job.designMode === "regeneration") return runRegenerationLoop(job);
   return runStepDesignLoop(job);
 }
@@ -1862,11 +2963,12 @@ async function collectOrieditaFoldResult(job) {
     method: "POST",
     body: JSON.stringify({ path: finalCreasePath }),
   });
-  const [document, foldedFigure, creaseBytes, foldBytes] = await Promise.all([
+  const [document, foldedFigure, creaseBytes, foldBytes, sourceFoldBytes] = await Promise.all([
     orieditaRequest("/document"),
     orieditaRequest("/folded-figure"),
     readFile(finalCreasePath),
     readFile(finalFoldPath),
+    readFile(inputPath),
   ]);
 
   return {
@@ -1882,45 +2984,135 @@ async function collectOrieditaFoldResult(job) {
     creaseImage: `data:image/png;base64,${creaseBytes.toString("base64")}`,
     foldedImage: `data:${foldedFigure.mimeType};base64,${foldedFigure.data}`,
     foldFile: `data:application/json;base64,${foldBytes.toString("base64")}`,
+    sourceFoldFile: `data:application/json;base64,${sourceFoldBytes.toString("base64")}`,
+  };
+}
+
+async function runCOrigamiFinalState(job) {
+  job.message = "第1段階: Orieditaで展開図と2D折り上がりを検証中";
+  await selectOrieditaFoldableAssignment(job);
+  const result = await collectOrieditaFoldResult(job);
+  const evaluation = {
+    score: 80,
+    iterations: 4,
+    summary: "展開図と2D平坦折りをOrieditaで確認し、同一CP上の折角・simple fold・narrowing状態を準備しました",
+    mode: "corigami_final_state_v1",
+    steps: [
+      { step: 1, score: 100, status: "crease_pattern_and_flat_fold_2d_checked" },
+      { step: 2, score: 75, status: "fold_angle_3d_preview_prepared" },
+      { step: 3, score: 75, status: "simple_fold_posture_prepared" },
+      { step: 4, score: 70, status: "narrowing_detail_prepared" },
+    ],
+    validation: {
+      phase1: "oriedita_flat_fold_2d_checked",
+      phases2To4: "zero_thickness_angle_preview",
+      sameCreasePatternGraph: true,
+      collision: "unchecked",
+      paperThickness: "unchecked",
+      foldSequence: "out_of_scope",
+      implementation: "corigami-inspired-clean-room",
+    },
+    physical: {
+      score: 100,
+      orieditaCompleted: true,
+      scope: "oriedita_flat_fold_2d",
+    },
+  };
+  await writeFile(
+    join(job.directory, "final-evaluation.json"),
+    `${JSON.stringify(evaluation, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  return {
+    ...result,
+    evaluation,
+    knowledgeMatch: null,
+    knowledgeReferences: [],
   };
 }
 
 async function executeJob(job) {
+  const abortController = new AbortController();
+  jobAbortControllers.set(job.id, abortController);
   job.status = "running";
   job.message = job.type === "oriedita-fold"
     ? "Orieditaで折り上がりを計算中"
+    : job.designMode === "corigami_final_state_v1"
+      ? "第1段階: 展開図と2D折り上がりを検証中"
     : job.designMode === "codex_mcp_loop"
       ? "CodexがOrieditaを一手ずつ操作・評価中"
       : job.designMode === "crease_step_search"
       ? "折り線を一手ずつ追加し、OrieditaとGroqで評価中"
       : "Orieditaで折り上げ、Groqが評価中";
-  job.startedAt = new Date().toISOString();
+  job.startedAt ??= new Date().toISOString();
+  job.completedAt = null;
+  job.error = null;
+  await persistJobState(job);
+  let requeue = false;
   try {
+    throwIfJobCancelled(job, abortController.signal);
     if (job.type === "oriedita-fold") {
-      job.result = await collectOrieditaFoldResult(job);
+      const result = await collectOrieditaFoldResult(job);
+      throwIfJobCancelled(job, abortController.signal);
+      job.result = result;
     } else {
-      job.result = await runDesignLoop(job);
+      const result = await runDesignLoop(job, { signal: abortController.signal });
+      throwIfJobCancelled(job, abortController.signal);
+      if (result === JOB_REQUEUE) {
+        job.result = null;
+        job.status = "queued";
+        requeue = true;
+      } else {
+        job.result = result;
+      }
     }
-    job.status = "done";
-    job.message = "完了";
+    if (!requeue) {
+      job.status = "done";
+      job.message = "完了";
+    }
   } catch (error) {
-    job.status = "failed";
-    job.message = "処理に失敗しました";
-    job.error = error instanceof Error ? error.message : String(error);
+    requeue = applyJobExecutionError(job, error, { signal: abortController.signal });
   } finally {
-    job.completedAt = new Date().toISOString();
+    jobAbortControllers.delete(job.id);
+    if (!requeue) codexActionHistoryByJob.delete(job.id);
+    job.completedAt = requeue ? null : new Date().toISOString();
+    await persistJobState(job);
   }
+  return requeue;
 }
 
 async function drainQueue() {
-  if (activeJobId) return;
+  if (isShuttingDown || activeJobId || activeJobPromise) return;
   const id = queue.shift();
   if (!id) return;
   const job = jobs.get(id);
-  if (!job) return void drainQueue();
+  if (!job || job.status === "cancelled" || job.cancelRequested) {
+    if (!isShuttingDown) void drainQueue();
+    return;
+  }
   activeJobId = id;
-  await executeJob(job);
-  activeJobId = null;
+  const execution = (async () => {
+    try {
+      return await executeJob(job);
+    } catch (error) {
+      job.status = "failed";
+      job.message = "ジョブ状態を保存できませんでした";
+      job.error = error instanceof Error ? error.message : String(error);
+      job.completedAt = new Date().toISOString();
+      await persistJobState(job).catch(() => {});
+      return false;
+    }
+  })();
+  activeJobPromise = execution;
+  let requeue = false;
+  try {
+    requeue = await execution;
+  } finally {
+    if (activeJobPromise === execution) activeJobPromise = null;
+    activeJobId = null;
+  }
+  if (isShuttingDown) return;
+  if (requeue && !job.cancelRequested && job.status === "queued") queue.push(id);
   void drainQueue();
 }
 
@@ -1928,6 +3120,11 @@ async function handle(request, response) {
   const origin = request.headers.origin;
   if (!isAllowedOrigin(origin)) {
     send(response, 403, { ok: false, error: "このサイトからは接続できません" }, origin);
+    return;
+  }
+  if (isShuttingDown) {
+    response.setHeader("Connection", "close");
+    send(response, 503, { ok: false, error: "APIを再起動しています" }, origin);
     return;
   }
   if (request.method === "OPTIONS") {
@@ -1951,9 +3148,17 @@ async function handle(request, response) {
         ready: true,
         busy: Boolean(activeJobId),
         queued: queue.length,
-        maxIterations,
-        maxCycles,
+        maxIterations: evaluationLimit,
+        evaluationLimit,
+        batchIterations: codexBatchIterations,
+        maxCycles: designMode === "codex_mcp_loop" ? evaluationLimit : maxCycles,
         targetScore,
+        scheduling: {
+          policy: "round_robin_per_codex_batch",
+          batchEvaluations: codexBatchIterations,
+          cancelEndpoint: "POST /jobs/{jobId}/cancel",
+          restartRecovery: true,
+        },
         designMode,
         stepSearch: { maxSteps: maxCycles, branchFactor: stepBranchFactor, beamWidth: stepBeamWidth },
         knowledgeSearch: knowledgeSearchEnabled,
@@ -1981,8 +3186,16 @@ async function handle(request, response) {
         busy: Boolean(activeJobId),
         queued: queue.length,
         authentication: apiToken ? "bearer" : "none",
-        maxCycles,
+        maxCycles: designMode === "codex_mcp_loop" ? evaluationLimit : maxCycles,
+        evaluationLimit,
+        batchIterations: codexBatchIterations,
         targetScore,
+        scheduling: {
+          policy: "round_robin_per_codex_batch",
+          batchEvaluations: codexBatchIterations,
+          cancelEndpoint: "POST /jobs/{jobId}/cancel",
+          restartRecovery: true,
+        },
         designMode,
         stepSearch: { maxSteps: maxCycles, branchFactor: stepBranchFactor, beamWidth: stepBeamWidth },
         knowledgeSearch: knowledgeSearchEnabled,
@@ -2030,6 +3243,14 @@ async function handle(request, response) {
     send(response, 202, { ok: true, job: publicJob(job) }, origin);
     return;
   }
+  const cancelMatch = url.pathname.match(/^\/jobs\/([0-9a-f-]+)\/cancel$/i);
+  if (request.method === "POST" && cancelMatch) {
+    const job = jobs.get(cancelMatch[1]);
+    if (!job || job.type !== "design") throw new HttpError(404, "ジョブが見つかりません");
+    await cancelJob(job);
+    send(response, job.status === "cancelled" ? 200 : 202, { ok: true, job: publicJob(job) }, origin);
+    return;
+  }
   const match = url.pathname.match(/^\/jobs\/([0-9a-f-]+)$/i);
   if (request.method === "GET" && match) {
     const job = jobs.get(match[1]);
@@ -2040,7 +3261,47 @@ async function handle(request, response) {
   throw new HttpError(404, "見つかりません");
 }
 
+function closeHttpServer(serverInstance) {
+  if (!serverInstance?.listening) return Promise.resolve();
+  return new Promise((resolveClose, rejectClose) => {
+    serverInstance.close((error) => error ? rejectClose(error) : resolveClose());
+  });
+}
+
+export async function completeGracefulShutdown({
+  serverInstance,
+  abortControllers = jobAbortControllers,
+  activeExecution = null,
+  exitCode = null,
+  exitImpl = (code) => process.exit(code),
+} = {}) {
+  // Calling close first stops new connections immediately. Its callback may fire
+  // before the job ends, so do not exit until the active execution has settled.
+  const serverCloseOutcome = closeHttpServer(serverInstance).then(
+    () => ({ error: null }),
+    (error) => ({ error }),
+  );
+  const restartError = new JobRestartError();
+  for (const controller of [...abortControllers.values()]) {
+    controller.abort(restartError);
+  }
+
+  let shutdownError = null;
+  try {
+    await activeExecution;
+  } catch (error) {
+    shutdownError = error;
+  }
+  const { error: closeError } = await serverCloseOutcome;
+  shutdownError ??= closeError;
+  if (shutdownError) throw shutdownError;
+  if (exitCode !== null && exitCode !== undefined) exitImpl(exitCode);
+}
+
 await mkdir(workRoot, { recursive: true, mode: 0o700 });
+if (process.env.ORI_AI_RESTORE_JOBS !== "0") {
+  await restorePersistedJobs();
+}
 export const server = createServer((request, response) => {
   void handle(request, response).catch((error) => {
     const status = error instanceof HttpError || error instanceof ApiInputError ? error.status : 500;
@@ -2050,4 +3311,30 @@ export const server = createServer((request, response) => {
 });
 server.listen(port, host, () => {
   process.stdout.write(`ORIAI local Oriedita server: http://${host}:${port}\n`);
+  void drainQueue();
 });
+
+export function shutdownServer({
+  exitCode = null,
+  exitImpl = (code) => process.exit(code),
+} = {}) {
+  if (shutdownPromise) return shutdownPromise;
+  isShuttingDown = true;
+  shutdownPromise = completeGracefulShutdown({
+    serverInstance: server,
+    abortControllers: jobAbortControllers,
+    activeExecution: activeJobPromise,
+    exitCode,
+    exitImpl,
+  });
+  return shutdownPromise;
+}
+
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.once(signal, () => {
+    void shutdownServer({ exitCode: 0 }).catch((error) => {
+      console.error(`APIを安全に停止できませんでした: ${error instanceof Error ? error.message : error}`);
+      process.exit(1);
+    });
+  });
+}

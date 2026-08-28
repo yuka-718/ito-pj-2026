@@ -7,12 +7,14 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 
 import {
+  appendActionIntentWal,
   inspectSymlinkFreePath,
   inspectRestrictedToolRequest,
   logicalizeMappedPaths,
   parseAllowedPaths,
   parsePathMappings,
   restrictedUpstreamEnvironment,
+  restrictedActionKey,
 } from "../local-oriedita/restricted-oriedita-mcp.mjs";
 
 const initialFold = "/tmp/job/initial.fold";
@@ -62,6 +64,26 @@ test("allowed path environment input is fail-closed", () => {
   assert.deepEqual([...parseAllowedPaths(JSON.stringify([initialFold, "relative.fold", 42]))], [initialFold]);
   assert.equal(parseAllowedPaths("not json").size, 0);
   assert.equal(parseAllowedPaths(undefined).size, 0);
+});
+
+test("add-line intent is fsynced to the WAL before upstream mutation", async (t) => {
+  const temporaryRoot = await realpath(await mkdtemp(join(tmpdir(), "oriai-action-intent-")));
+  t.after(() => rm(temporaryRoot, { recursive: true, force: true }));
+  const walPath = join(temporaryRoot, "action-attempts.jsonl");
+  const forward = { ax: -200, ay: 12.5, bx: 200, by: 12.5, color: "VALLEY" };
+  const reversed = { ax: 200, ay: 12.5, bx: -200, by: 12.5, color: "VALLEY" };
+  const actionKey = restrictedActionKey(forward);
+  assert.equal(actionKey, restrictedActionKey(reversed));
+  appendActionIntentWal(walPath, {
+    schema: "oriai-codex-action-wal-v1",
+    phase: "intent",
+    batch: 3,
+    batch_step: 2,
+    action_key: actionKey,
+  });
+  const record = JSON.parse((await readFile(walPath, "utf8")).trim());
+  assert.equal(record.phase, "intent");
+  assert.equal(record.action_key, actionKey);
 });
 
 test("path mappings rewrite exact logical paths to symlink-free physical staging paths", async (t) => {
