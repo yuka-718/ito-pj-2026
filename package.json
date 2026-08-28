@@ -18,7 +18,8 @@
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate",
     "training:origami": "node scripts/origami-training-pipeline.mjs",
-    "knowledge:import-additional": "node scripts/import-additional-origami-knowledge.mjs"
+    "knowledge:import-additional": "node scripts/import-additional-origami-knowledge.mjs",
+    "knowledge:package-5000": "node scripts/package-origami-fold-cp-5000.mjs"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",

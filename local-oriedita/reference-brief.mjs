@@ -5,6 +5,8 @@ export function buildReferenceDocument({
   images = [],
   structures = [],
 } = {}) {
+  const structuralCorpus = structures.find(({ corpus } = {}) => corpus)?.corpus ?? null;
+  const searchedPatternCount = Number(structuralCorpus?.searchedPatternCount) || 0;
   return {
     schema: "oriai-rag-references-v1",
     prompt: String(prompt ?? ""),
@@ -22,9 +24,11 @@ export function buildReferenceDocument({
       maximum_images: 8,
     },
     structural_knowledge: {
-      pattern_count: 5157,
+      pattern_count: Number(structuralCorpus?.sourcePatternCount) || 0,
+      searched_pattern_count: searchedPatternCount,
+      retrieval_strategy: searchedPatternCount ? "prompt_to_design_features_then_rank_5000" : "not_run",
       candidates: structures,
-      use: "initial_structure_reference_only",
+      use: searchedPatternCount ? "select_validated_initial_then_modify" : "square_fallback",
       human_verified_steps: false,
     },
     policy: {
@@ -41,6 +45,7 @@ export function buildReferenceDocument({
 export function buildPreliminaryDesignBrief({ prompt, goal, works = [], structures = [] } = {}) {
   const parts = Array.isArray(goal?.parts) ? goal.parts : [];
   const totalImportance = parts.reduce((sum, part) => sum + Math.max(1, Number(part.importance) || 1), 0) || 1;
+  const structuralCorpus = structures.find(({ corpus } = {}) => corpus)?.corpus ?? null;
   return {
     schema: "oriai-design-brief-v1",
     status: "retrieved",
@@ -56,9 +61,15 @@ export function buildPreliminaryDesignBrief({ prompt, goal, works = [], structur
       work_references: works.map(({ id, title, creator, source_url, reason, score }) => ({
         id, title, creator, source_url, reason, score,
       })),
-      structural_candidates: structures.map(({ id, title, family, params, reason, score }) => ({
-        id, title, family, params, reason, score,
+      structural_candidates: structures.map(({ id, title, family, params, reason, score, scoreBreakdown, corpus }) => ({
+        id, title, family, params, reason, score, score_breakdown: scoreBreakdown, corpus,
       })),
+      structural_search: {
+        strategy: structuralCorpus ? "prompt_to_design_features_then_rank_5000" : "not_run",
+        searched_pattern_count: Number(structuralCorpus?.searchedPatternCount) || 0,
+        selected_pattern_id: null,
+        modification_mode: "pending_oriedita_validation",
+      },
     },
     codex_design: null,
     safeguards: {
@@ -79,12 +90,35 @@ export function completeDesignBrief(preliminary, codexDesign) {
   };
 }
 
-export function chooseValidatedInitialFold(structuralMatches = [], validations = [], fallbackFold) {
-  const passed = validations.find(({ status, oriedita_completed: completed, violation_count: violations }) =>
-    status === "passed" && completed === true && Number(violations) === 0);
-  const selectedIndex = passed
-    ? structuralMatches.findIndex(({ pattern }) => pattern.id === passed.pattern_id)
-    : -1;
+export function chooseValidatedInitialFold(
+  structuralMatches = [],
+  validations = [],
+  fallbackFold,
+  { requireIncrementalModification = false } = {},
+) {
+  const candidates = structuralMatches.flatMap((match, index) => {
+    const validation = validations.find(({ pattern_id: patternId }) => patternId === match.pattern.id);
+    const basePassed = validation?.status === "passed"
+      && validation.oriedita_completed === true
+      && Number.isInteger(validation.violation_count)
+      && validation.violation_count === 0;
+    const smoke = validation?.modifiability;
+    const modificationPassed = smoke?.status === "passed"
+      && smoke.add_line_completed === true
+      && smoke.calculation_started === true
+      && Number.isInteger(smoke.violation_count)
+      && smoke.violation_count === 0
+      && smoke.oriedita_completed === true
+      && smoke.parent_reloaded === true;
+    return basePassed && (!requireIncrementalModification || modificationPassed)
+      ? [{ match, index }]
+      : [];
+  }).sort((a, b) => {
+    const scoreA = Number.isFinite(Number(a.match.score)) ? Number(a.match.score) : Number.NEGATIVE_INFINITY;
+    const scoreB = Number.isFinite(Number(b.match.score)) ? Number(b.match.score) : Number.NEGATIVE_INFINITY;
+    return scoreB - scoreA || a.index - b.index;
+  });
+  const selectedIndex = candidates[0]?.index ?? -1;
   if (selectedIndex >= 0 && structuralMatches[selectedIndex]?.pattern?.fold) {
     return {
       fold: structuralMatches[selectedIndex].pattern.fold,

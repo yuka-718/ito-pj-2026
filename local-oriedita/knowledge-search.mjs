@@ -30,6 +30,8 @@ const MOTIF_PROFILES = [
   {
     key: "winged_insect",
     pattern: /蝶|ちょう|バタフライ|butterfly|羽(?:を|が)?(?:広げ|開い)|winged insect/i,
+    targetCapacity: 8,
+    complexity: 0.58,
     references: [
       { family: "single_vertex_kawasaki", params: { degree: 8 } },
       { id: "reference_03_eight_spoke" },
@@ -39,6 +41,8 @@ const MOTIF_PROFILES = [
   {
     key: "insect",
     pattern: /クワガタ|カブトムシ|昆虫|虫|beetle|insect/i,
+    targetCapacity: 12,
+    complexity: 0.78,
     references: [
       { family: "box_pleat", params: { grid: 10, variant: 0 } },
       { family: "single_vertex_kawasaki", params: { degree: 12 } },
@@ -48,6 +52,8 @@ const MOTIF_PROFILES = [
   {
     key: "rabbit",
     pattern: /うさぎ|ウサギ|兎|rabbit|bunny/i,
+    targetCapacity: 8,
+    complexity: 0.55,
     references: [
       { id: "reference_12_blintz_precrease" },
       { family: "single_vertex_kawasaki", params: { degree: 8 } },
@@ -57,6 +63,8 @@ const MOTIF_PROFILES = [
   {
     key: "fish",
     pattern: /金魚|魚|さかな|fish/i,
+    targetCapacity: 6,
+    complexity: 0.45,
     references: [
       { id: "reference_14_waterbomb_base_reference" },
       { family: "single_vertex_kawasaki", params: { degree: 6 } },
@@ -66,6 +74,8 @@ const MOTIF_PROFILES = [
   {
     key: "bird",
     pattern: /鶴|つる|鳥|bird|crane/i,
+    targetCapacity: 8,
+    complexity: 0.52,
     references: [
       { id: "reference_03_eight_spoke" },
       { family: "single_vertex_kawasaki", params: { degree: 8 } },
@@ -75,6 +85,8 @@ const MOTIF_PROFILES = [
   {
     key: "quadruped",
     pattern: /猫|ねこ|犬|いぬ|四足|cat|dog/i,
+    targetCapacity: 8,
+    complexity: 0.6,
     references: [
       { id: "reference_12_blintz_precrease" },
       { family: "single_vertex_kawasaki", params: { degree: 8 } },
@@ -84,6 +96,8 @@ const MOTIF_PROFILES = [
   {
     key: "flower",
     pattern: /花|バラ|桜|flower|rose/i,
+    targetCapacity: 10,
+    complexity: 0.5,
     references: [
       { family: "radial_flasher_like", params: { rays: 10, levels: 1 } },
       { family: "square_twist_array", params: { rows: 1, cols: 1 } },
@@ -93,6 +107,8 @@ const MOTIF_PROFILES = [
   {
     key: "dragon",
     pattern: /龍|竜|ドラゴン|dragon/i,
+    targetCapacity: 12,
+    complexity: 0.85,
     references: [
       { family: "box_pleat", params: { grid: 16, variant: 0 } },
       { family: "single_vertex_kawasaki", params: { degree: 12 } },
@@ -102,13 +118,76 @@ const MOTIF_PROFILES = [
   {
     key: "snake",
     pattern: /蛇|へび|細長|snake/i,
+    targetCapacity: 12,
+    complexity: 0.48,
     references: [
       { family: "accordion_pleats", params: { count: 12 } },
       { family: "yoshimura_like", params: { rows: 2, cols: 6 } },
       { family: "miura_like", params: { rows: 2, cols: 6 } },
     ],
   },
+  {
+    key: "architecture",
+    pattern: /建築|建物|屋根|タワー|塔|ファサード|シェル|architecture|building|roof|tower|facade/i,
+    targetCapacity: 8,
+    complexity: 0.62,
+    references: [
+      { family: "nonuniform_orthogonal_grid", params: { rows: 8, cols: 8 } },
+      { family: "yoshimura_like", params: { rows: 4, cols: 6 } },
+      { family: "miura_like", params: { rows: 4, cols: 6 } },
+    ],
+  },
+  {
+    key: "star",
+    pattern: /星|スター|太陽|star|sun/i,
+    targetCapacity: 10,
+    complexity: 0.5,
+    references: [
+      { family: "radial_flasher_like", params: { rays: 10, levels: 1 } },
+      { family: "concentric_polygon_rings", params: { sides: 10, levels: 3 } },
+      { id: "reference_10_radial_12" },
+    ],
+  },
+  {
+    key: "vehicle",
+    pattern: /車|船|飛行機|宇宙船|ロケット|vehicle|car|boat|airplane|spaceship|rocket/i,
+    targetCapacity: 8,
+    complexity: 0.58,
+    references: [
+      { family: "box_pleat", params: { grid: 8, variant: 0 } },
+      { family: "single_vertex_kawasaki", params: { degree: 8 } },
+      { family: "accordion_pleats", params: { count: 10 } },
+    ],
+  },
 ];
+
+const STRUCTURAL_FAMILY_FEATURES = Object.freeze({
+  miura_like: { symmetric: true, elongated: true, grid: true },
+  single_vertex_kawasaki: { symmetric: false, radial: true, branching: true },
+  radial_flasher_like: { symmetric: true, radial: true },
+  square_twist_array: { symmetric: true, grid: true },
+  kresling_like: { symmetric: true, radial: true, elongated: true },
+  accordion_pleats: { symmetric: true, elongated: true },
+  yoshimura_like: { symmetric: true, elongated: true, grid: true },
+  box_pleat: { symmetric: true, grid: true, branching: true },
+  triangular_lattice: { symmetric: true, grid: true },
+  waterbomb_tessellation: { symmetric: true, grid: true },
+  reference_precrease: { symmetric: true, branching: true },
+  boundary_fan_pleats: { symmetric: false, radial: true, branching: true },
+  herringbone_corrugation: { symmetric: true, elongated: true, grid: true },
+  nonuniform_orthogonal_grid: { symmetric: true, grid: true },
+  concentric_polygon_rings: { symmetric: true, radial: true },
+});
+
+const FOLDABILITY_CONFIDENCE = Object.freeze({
+  local_theorem_constraints_constructed: 90,
+  local_kawasaki_and_maekawa_constructed_not_physical_verified: 82,
+  construction_known_parallel_pleats_not_human_verified: 74,
+  miura_family_topology_constructed_not_rigid_verified: 68,
+  corrugation_primitive_not_global_fold_verified: 58,
+  construction_heuristic_boundary_fan_not_physical_verified: 54,
+  not_verified: 30,
+});
 
 const LIBRARY_QUERY_RULES = [
   { family: "dragonfly", pattern: /とんぼ|トンボ|蜻蛉|dragonfly/i },
@@ -356,46 +435,331 @@ export function retrieveKnowledge(pack, query, { limit = 3 } = {}) {
   }));
 }
 
-export function retrieveStructuralKnowledge(pack, query, { limit = 3 } = {}) {
+export function selectStructuralCorpus(packOrPatterns, count = 5_000) {
+  const patterns = Array.isArray(packOrPatterns) ? packOrPatterns : packOrPatterns?.patterns;
+  if (!Array.isArray(patterns) || patterns.length < count) {
+    throw new Error(`構造知識が不足しています (${patterns?.length ?? 0}/${count})`);
+  }
+  return [...patterns]
+    .sort((a, b) => {
+      const hashA = String(a.canonical_sha256 ?? "");
+      const hashB = String(b.canonical_sha256 ?? "");
+      if (hashA < hashB) return -1;
+      if (hashA > hashB) return 1;
+      return String(a.id).localeCompare(String(b.id), "en");
+    })
+    .slice(0, count);
+}
+
+function bounded(value, minimum = 0, maximum = 100) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function rounded(value, digits = 2) {
+  const factor = 10 ** digits;
+  return Math.round(value * factor) / factor;
+}
+
+function intentPreferences(profile, family, query) {
+  let preferences = profile?.references?.map((reference) => ({
+    ...reference,
+    params: reference.family
+      ? { ...(reference.params ?? {}), ...numericConstraints(query, reference.family) }
+      : reference.params,
+  })) ?? [];
+  const petals = query.match(/(\d+)\s*枚(?:の)?\s*花びら/);
+  if (profile?.key === "flower" && petals) {
+    const rays = Number.parseInt(petals[1], 10);
+    preferences = preferences.map((reference) => reference.family === "radial_flasher_like"
+      ? { ...reference, params: { ...(reference.params ?? {}), rays } }
+      : reference);
+  }
+  const floors = query.match(/(\d+)\s*階/);
+  if (profile?.key === "architecture" && /タワー|塔|円筒|tower|cylinder/i.test(query)) {
+    preferences = [{
+      family: "kresling_like",
+      params: { sectors: 6, levels: floors ? Number.parseInt(floors[1], 10) : 4 },
+    }, ...preferences];
+  }
+  if (family) {
+    const existing = preferences.find((reference) => reference.family === family);
+    preferences = [{
+      family,
+      params: {
+        ...(family === "accordion_pleats" && !existing ? { count: profile?.targetCapacity ?? 8 } : {}),
+        ...(existing?.params ?? {}),
+        ...numericConstraints(query, family),
+      },
+    }, ...preferences.filter((reference) => reference.family !== family)];
+  }
+  if (!preferences.length) {
+    preferences = [
+      { id: "reference_12_blintz_precrease" },
+      { family: "single_vertex_kawasaki", params: { degree: 8 } },
+      { family: "box_pleat", params: { grid: 8, variant: 0 } },
+    ];
+  }
+  if (profile && !preferences.some((preference) => preference.family === "accordion_pleats")) {
+    preferences.push({ family: "accordion_pleats", params: { count: profile.targetCapacity } });
+  }
+  const validationFallbacks = [
+    { id: "origami-add-20260827-1032", validationFallback: true },
+    { id: "origami-add-20260827-0890", validationFallback: true },
+  ];
+  preferences = [...preferences, ...validationFallbacks];
+  const seen = new Set();
+  return preferences.filter((preference) => {
+    const key = preference.id ? `id:${preference.id}` : `family:${preference.family}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function parseStructuralIntent(query, goal = null) {
+  const normalizedQuery = normalize(query ?? "");
+  const profile = motifProfile(normalizedQuery);
+  const family = explicitFamily(normalizedQuery);
+  const preferences = intentPreferences(profile, family, normalizedQuery);
+  const suppliedParts = Array.isArray(goal?.parts) ? goal.parts.filter((part) => part?.label) : [];
+  const targetPartCount = Math.max(2, Math.min(16, suppliedParts.length || Math.round((profile?.targetCapacity ?? 8) * 0.7)));
+  const adjectiveComplexity = /簡単|単純|少ない|simple|easy/i.test(normalizedQuery)
+    ? 0.2
+    : /複雑|精密|リアル|細かい|complex|detailed|realistic/i.test(normalizedQuery)
+      ? 0.82
+      : null;
+  const cylindrical = /円筒|タワー|塔|cylinder|tower/i.test(normalizedQuery);
+  const radial = profile?.key === "flower" || profile?.key === "star" || cylindrical
+    || /放射|花びら|星|radial|petal/i.test(normalizedQuery);
+  const elongated = profile?.key === "snake" || cylindrical || /細長|長い|蛇腹|elongated|long/i.test(normalizedQuery);
+  const branching = ["winged_insect", "insect", "rabbit", "fish", "bird", "quadruped", "dragon", "vehicle"].includes(profile?.key)
+    || suppliedParts.length >= 4;
+  const grid = !cylindrical && ["insect", "quadruped", "dragon", "architecture", "vehicle"].includes(profile?.key)
+    || /格子|グリッド|grid|box pleat/i.test(normalizedQuery);
+  return {
+    schema: "oriai-structural-intent-v1",
+    profile: profile?.key ?? "generic",
+    explicit_family: family,
+    symmetry: typeof goal?.symmetry === "boolean" ? goal.symmetry : profile?.key !== "snake",
+    target_part_count: targetPartCount,
+    target_capacity: profile?.targetCapacity ?? Math.max(6, Math.min(16, targetPartCount + 2)),
+    complexity: adjectiveComplexity ?? profile?.complexity ?? bounded(0.28 + targetPartCount * 0.055, 0.25, 0.78),
+    style: { radial, elongated, branching, grid },
+    preferred: preferences.map((preference, index) => ({ ...preference, priority: index + 1 })),
+    recognized_terms: [
+      ...(radial ? ["radial"] : []),
+      ...(elongated ? ["elongated"] : []),
+      ...(branching ? ["branching"] : []),
+      ...(grid ? ["grid"] : []),
+      ...(goal?.symmetry !== false ? ["symmetry"] : []),
+    ],
+  };
+}
+
+function structuralCapacity(pattern) {
+  for (const key of ["degree", "rays", "grid", "count", "sectors", "sides"]) {
+    const value = Number(pattern.params?.[key]);
+    if (Number.isFinite(value)) return value;
+  }
+  return Number(pattern.max_degree) || 4;
+}
+
+function parameterSimilarity(pattern, preference) {
+  if (preference?.id === pattern.id) return { score: 100, distance: 0 };
+  const requested = preference?.params ?? {};
+  const entries = Object.entries(requested).filter(([, value]) => Number.isFinite(Number(value)));
+  if (!entries.length) return { score: preference ? 70 : 35, distance: preference ? 0 : 100 };
+  let distance = 0;
+  let similarity = 0;
+  let weightTotal = 0;
+  for (const [key, expectedValue] of entries) {
+    const expected = Number(expectedValue);
+    const actual = Number(pattern.params?.[key]);
+    const weight = ["degree", "rays", "grid", "count"].includes(key) ? 2 : 1;
+    weightTotal += weight;
+    if (!Number.isFinite(actual)) {
+      distance += 100 * weight;
+      continue;
+    }
+    const difference = Math.abs(actual - expected);
+    distance += difference * weight;
+    similarity += bounded(1 - difference / Math.max(2, Math.abs(expected))) * weight;
+  }
+  return {
+    score: weightTotal ? (similarity / weightTotal) * 100 : 0,
+    distance,
+  };
+}
+
+function topologySimilarity(pattern, intent) {
+  const feature = STRUCTURAL_FAMILY_FEATURES[pattern.family] ?? {};
+  const values = [];
+  const capacityDifference = Math.abs(structuralCapacity(pattern) - intent.target_capacity);
+  values.push(bounded(100 - (capacityDifference / Math.max(4, intent.target_capacity)) * 75));
+  if (intent.symmetry) values.push(feature.symmetric ? 100 : 45);
+  for (const key of ["radial", "elongated", "branching", "grid"]) {
+    if (intent.style[key]) values.push(feature[key] ? 100 : 20);
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function complexitySimilarity(pattern, intent) {
+  const normalizedEdges = bounded(Math.log1p(Number(pattern.edge_count) || 0) / Math.log1p(200), 0, 1);
+  return bounded(100 - Math.abs(normalizedEdges - intent.complexity) * 125);
+}
+
+function structureTermSimilarity(pattern, intent) {
+  if (!intent.recognized_terms.length) return 50;
+  const feature = STRUCTURAL_FAMILY_FEATURES[pattern.family] ?? {};
+  const matches = intent.recognized_terms.filter((term) => term === "symmetry" ? feature.symmetric : feature[term]).length;
+  return (matches / intent.recognized_terms.length) * 100;
+}
+
+function scoreStructuralPattern(pattern, intent) {
+  const exactIndex = intent.preferred.findIndex((preference) => preference.id === pattern.id);
+  const familyIndex = intent.preferred.findIndex((preference) => preference.family === pattern.family);
+  const preference = exactIndex >= 0 ? intent.preferred[exactIndex] : familyIndex >= 0 ? intent.preferred[familyIndex] : null;
+  const preferenceIndex = exactIndex >= 0 ? exactIndex : familyIndex;
+  const affinity = preferenceIndex >= 0 ? Math.max(45, 100 - preferenceIndex * 18) : 18;
+  const parameters = parameterSimilarity(pattern, preference);
+  const components = {
+    family_or_reference: rounded(affinity * 0.45),
+    parameters: rounded(parameters.score * 0.25),
+    complexity: rounded(complexitySimilarity(pattern, intent) * 0.1),
+    topology: rounded(topologySimilarity(pattern, intent) * 0.1),
+    foldability_description: rounded((FOLDABILITY_CONFIDENCE[pattern.foldability] ?? 20) * 0.05),
+    structural_terms: rounded(structureTermSimilarity(pattern, intent) * 0.05),
+    validation_fallback_penalty: preference?.validationFallback === true ? -15 : 0,
+  };
+  const score = rounded(Object.values(components).reduce((sum, value) => sum + value, 0));
+  return { score, components, parameterDistance: parameters.distance, preference };
+}
+
+function isBasicOrieditaStructuralCandidate(pattern) {
+  const fold = pattern?.fold;
+  if (!(fold
+    && pattern.is_finished_model !== true
+    && !fold.frame_classes?.includes("foldedForm")
+    && Array.isArray(fold.vertices_coords)
+    && Array.isArray(fold.edges_vertices)
+    && Array.isArray(fold.edges_assignment)
+    && fold.edges_vertices.length === fold.edges_assignment.length)) return false;
+  if (fold.vertices_coords.length < 3 || fold.edges_vertices.length < 1) return false;
+  if (!fold.vertices_coords.every((point) => Array.isArray(point)
+    && point.length >= 2
+    && Number.isFinite(Number(point[0]))
+    && Number.isFinite(Number(point[1])))) return false;
+  if (!fold.edges_vertices.every((edge) => Array.isArray(edge)
+    && edge.length === 2
+    && edge.every((index) => Number.isInteger(index) && index >= 0 && index < fold.vertices_coords.length)
+    && edge[0] !== edge[1])) return false;
+  const assignments = new Set(fold.edges_assignment);
+  return ![...assignments].some((assignment) => !["B", "M", "V", "F", "U"].includes(assignment));
+}
+
+function isStructuralCandidate(pattern) {
+  if (!isBasicOrieditaStructuralCandidate(pattern)) return false;
+  const fold = pattern.fold;
+  const assignments = new Set(fold.edges_assignment);
+  if ([...assignments].some((assignment) => !["B", "M", "V"].includes(assignment))) return false;
+  const vertices = fold.vertices_coords;
+  const xs = vertices.map((point) => Number(point?.[0]));
+  const ys = vertices.map((point) => Number(point?.[1]));
+  if ([...xs, ...ys].some((coordinate) => !Number.isFinite(coordinate))) return false;
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const epsilon = Math.max(maxX - minX, maxY - minY, 1) * 1e-7;
+  const boundaryIncidence = Array.from({ length: vertices.length }, () => 0);
+  const creaseIncidence = Array.from({ length: vertices.length }, () => 0);
+  fold.edges_vertices.forEach(([a, b], edgeIndex) => {
+    const assignment = fold.edges_assignment[edgeIndex];
+    if (assignment === "B") {
+      boundaryIncidence[a] += 1;
+      boundaryIncidence[b] += 1;
+    } else {
+      creaseIncidence[a] += 1;
+      creaseIncidence[b] += 1;
+    }
+  });
+  return vertices.every(([x, y], vertexIndex) => {
+    if (!creaseIncidence[vertexIndex]) return true;
+    const onBoundary = Math.abs(x - minX) <= epsilon
+      || Math.abs(x - maxX) <= epsilon
+      || Math.abs(y - minY) <= epsilon
+      || Math.abs(y - maxY) <= epsilon;
+    return !onBoundary || boundaryIncidence[vertexIndex] >= 2;
+  });
+}
+
+export function retrieveStructuralKnowledge(pack, query, { limit = 3, goal = null, corpusSize = 5_000 } = {}) {
   const normalizedQuery = normalize(query ?? "");
   if (!normalizedQuery) return [];
-  const maximum = Math.max(1, Math.min(3, Math.floor(Number(limit) || 3)));
-  const family = explicitFamily(normalizedQuery);
-  const profile = motifProfile(normalizedQuery);
-  const preferredFamilySpec = profile && family
-    ? profile.references.find((reference) => reference.family === family)
-    : null;
-  const specs = profile
-    ? family
-      ? [{
-        family,
-        params: { ...(preferredFamilySpec?.params ?? {}), ...numericConstraints(normalizedQuery, family) },
-      }, ...profile.references]
-      : profile.references
-    : family
-      ? [{ family, params: numericConstraints(normalizedQuery, family) }]
-      : [];
-  const seenFamilies = new Set();
+  const maximum = Math.max(1, Math.min(12, Math.floor(Number(limit) || 3)));
+  const boundedCorpusSize = Math.max(maximum, Math.min(pack.patterns.length, Math.floor(Number(corpusSize) || 5_000)));
+  const intent = parseStructuralIntent(normalizedQuery, goal);
+  const corpus = selectStructuralCorpus(pack, boundedCorpusSize);
   const seenIds = new Set();
-  const results = [];
-  for (const spec of specs) {
-    const pattern = resolveReference(pack, spec, normalizedQuery);
-    if (!pattern?.fold || pattern.is_finished_model === true || seenIds.has(pattern.id) || seenFamilies.has(pattern.family)) continue;
+  const seenHashes = new Set();
+  const compareMatches = (a, b) =>
+    b.score - a.score
+    || a.parameterDistance - b.parameterDistance
+    || (a.pattern.edge_count ?? 0) - (b.pattern.edge_count ?? 0)
+    || String(a.pattern.id).localeCompare(String(b.pattern.id), "en");
+  const ranked = corpus.flatMap((pattern) => {
+    const isCandidate = intent.explicit_family
+      ? pattern.family === intent.explicit_family && isBasicOrieditaStructuralCandidate(pattern)
+      : isStructuralCandidate(pattern);
+    if (!isCandidate || seenIds.has(pattern.id) || seenHashes.has(pattern.canonical_sha256)) return [];
     seenIds.add(pattern.id);
-    seenFamilies.add(pattern.family);
-    const score = Math.max(1, 100 - results.length * 12);
-    results.push({
+    seenHashes.add(pattern.canonical_sha256);
+    const scored = scoreStructuralPattern(pattern, intent);
+    return [{
       pattern,
       matchKind: "structural_reference",
-      profile: profile?.key ?? null,
-      reason: profile
-        ? `${profile.key}の基本形・部位配置・面積配分を考えるための${pattern.family}構造`
-        : `指定された${pattern.family}構造の初期候補`,
-      score,
-    });
+      profile: intent.profile,
+      reason: `${intent.profile}の部位数・対称性・複雑度に対する${pattern.family}構造の類似候補（Oriedita検証前）`,
+      score: scored.score,
+      scoreBreakdown: scored.components,
+      parameterDistance: scored.parameterDistance,
+      validationFallback: scored.preference?.validationFallback === true,
+      requiresModifiabilitySmokeTest: true,
+      structuralIntent: intent,
+      requiresOrieditaValidation: true,
+      corpus: {
+        strategy: "canonical_sha256_first_n",
+        searchedPatternCount: boundedCorpusSize,
+        sourcePatternCount: pack.patterns.length,
+      },
+    }];
+  }).sort(compareMatches);
+
+  if (intent.explicit_family) return ranked.filter(({ pattern }) => pattern.family === intent.explicit_family).slice(0, maximum);
+  const results = [];
+  const selectedIds = new Set();
+  const familyCounts = new Map();
+  for (const preference of intent.preferred) {
+    const candidate = ranked.find(({ pattern }) => !selectedIds.has(pattern.id)
+      && (preference.id ? pattern.id === preference.id : pattern.family === preference.family));
+    if (!candidate) continue;
+    if ((familyCounts.get(candidate.pattern.family) ?? 0) >= 2) continue;
+    results.push(candidate);
+    selectedIds.add(candidate.pattern.id);
+    familyCounts.set(candidate.pattern.family, (familyCounts.get(candidate.pattern.family) ?? 0) + 1);
     if (results.length >= maximum) break;
   }
-  return results;
+  if (results.length < maximum) {
+    for (const candidate of ranked) {
+      if (selectedIds.has(candidate.pattern.id)) continue;
+      if ((familyCounts.get(candidate.pattern.family) ?? 0) >= 2) continue;
+      results.push(candidate);
+      selectedIds.add(candidate.pattern.id);
+      familyCounts.set(candidate.pattern.family, (familyCounts.get(candidate.pattern.family) ?? 0) + 1);
+      if (results.length >= maximum) break;
+    }
+  }
+  return results.sort(compareMatches);
 }
 
 export function searchKnowledge(pack, query) {
@@ -429,6 +793,12 @@ export function publicKnowledgeReference(match) {
     profile: match.profile,
     reason: match.reason,
     score: match.score ?? null,
+    scoreBreakdown: match.scoreBreakdown ?? null,
+    structuralIntent: match.structuralIntent ?? null,
+    requiresOrieditaValidation: match.requiresOrieditaValidation === true,
+    requiresModifiabilitySmokeTest: match.requiresModifiabilitySmokeTest === true,
+    validationFallback: match.validationFallback === true,
+    corpus: match.corpus ?? null,
   });
 }
 

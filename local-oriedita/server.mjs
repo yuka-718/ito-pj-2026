@@ -40,8 +40,8 @@ import {
 } from "./groq-step-evaluator.mjs";
 import { evaluatePartialFold } from "./partial-evaluation.mjs";
 import { runStepSearch } from "./step-search.mjs";
-import { createSquareRootFold } from "./crease-actions.mjs";
-import { runCodexOrieditaLoop } from "./codex-oriedita-runner.mjs";
+import { createSquareRootFold, enumerateFullWidthCreaseActions } from "./crease-actions.mjs";
+import { assertInitialCreasesPreserved, runCodexOrieditaLoop } from "./codex-oriedita-runner.mjs";
 import {
   ApiInputError,
   createOpenApiDocument,
@@ -86,6 +86,24 @@ const orieditaRuntime = resolve(process.env.ORIEDITA_MCP_RUNTIME_DIR
 const connectionFile = resolve(orieditaRuntime, "connection.json");
 const orieditaLogFile = resolve(orieditaRuntime, "oriedita-api.log");
 const apiToken = process.env.ORI_AI_API_TOKEN?.trim() ?? "";
+
+export function searchedStructuralPatternCount(prompt) {
+  return typeof prompt === "string" && prompt.trim() ? 5_000 : 0;
+}
+
+export function assertSuccessfulFinalFoldCalculation(calculation, label = "最終候補") {
+  if (!calculation?.started) {
+    throw new Error(`${label}の平坦折り計算を開始できませんでした`);
+  }
+  const violationCount = calculation?.violationCount;
+  if (!Number.isInteger(violationCount) || violationCount < 0) {
+    throw new Error(`${label}の局所平坦折り違反数を確認できませんでした`);
+  }
+  if (violationCount > 0) {
+    throw new Error(`${label}に局所平坦折り違反が${violationCount}件あります`);
+  }
+  return violationCount;
+}
 
 function loadGroqApiKey() {
   const configured = process.env.GROQ_API_KEY?.trim();
@@ -281,15 +299,24 @@ async function createJob(input) {
   const goal = buildDesignGoal(input.prompt, input.goal);
   const preflight = validateCandidatePool(candidateFolds, goal);
   const inputFold = candidateFolds[preflight.selectedIndex];
-  const searchWorks = origamiSearchCatalog
+  const searchedPatternCount = searchedStructuralPatternCount(input.prompt);
+  const shouldRunTextRetrieval = searchedPatternCount > 0;
+  const searchWorks = origamiSearchCatalog && shouldRunTextRetrieval
     ? searchOrigamiWorks(origamiSearchCatalog, input.prompt, { minimum: 3, maximum: 5 })
     : [];
-  const referenceImages = origamiSearchCatalog
+  const referenceImages = origamiSearchCatalog && shouldRunTextRetrieval
     ? await selectOrigamiReferenceImages(origamiSearchCatalog, searchWorks, {
       maximum: input.referenceImage ? 7 : 8,
     })
     : [];
-  const structuralMatches = retrieveStructuralKnowledge(knowledgePack, input.prompt, { limit: 3 });
+  const structuralSearchPool = shouldRunTextRetrieval
+    ? retrieveStructuralKnowledge(knowledgePack, input.prompt, {
+      limit: 12,
+      goal,
+      corpusSize: searchedPatternCount,
+    })
+    : [];
+  const structuralMatches = structuralSearchPool.slice(0, 3);
   const workReferences = searchWorks.map(publicOrigamiWorkReference);
   const knowledgeReferences = structuralMatches.map(publicKnowledgeReference);
   const references = buildReferenceDocument({
@@ -321,7 +348,12 @@ async function createJob(input) {
   await writeFile(join(directory, "preflight-validations.json"), `${JSON.stringify(preflight.validations, null, 2)}\n`, { mode: 0o600 });
   await writeFile(join(directory, "iterations.json"), "[]\n", { mode: 0o600 });
   await writeFile(join(directory, "knowledge-references.json"), `${JSON.stringify(knowledgeReferences, null, 2)}\n`, { mode: 0o600 });
-  await Promise.all(structuralMatches.map((match, index) =>
+  await writeFile(
+    join(directory, "structural-search.json"),
+    `${JSON.stringify(structuralSearchPool.map(publicKnowledgeReference), null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  await Promise.all(structuralSearchPool.map((match, index) =>
     writeFile(
       join(directory, `structural-candidate-${String(index + 1).padStart(2, "0")}.fold`),
       `${JSON.stringify(match.pattern.fold, null, 2)}\n`,
@@ -349,6 +381,8 @@ async function createJob(input) {
     references,
     designBrief,
     structuralMatches,
+    structuralSearchPool,
+    searchedPatternCount,
     fallbackInitialFold,
     prompt: input.prompt,
     goal,
@@ -884,6 +918,278 @@ function mapPaperPoint(point, bounds) {
   ];
 }
 
+function segmentIntersectionScore(a, b, c, d) {
+  const rx = b[0] - a[0];
+  const ry = b[1] - a[1];
+  const sx = d[0] - c[0];
+  const sy = d[1] - c[1];
+  const denominator = rx * sy - ry * sx;
+  if (Math.abs(denominator) <= 1e-9) return 0;
+  const qpx = c[0] - a[0];
+  const qpy = c[1] - a[1];
+  const t = (qpx * sy - qpy * sx) / denominator;
+  const u = (qpx * ry - qpy * rx) / denominator;
+  if (t <= 1e-8 || t >= 1 - 1e-8 || u < -1e-8 || u > 1 + 1e-8) return 0;
+  return u <= 1e-8 || u >= 1 - 1e-8 ? 0.25 : 1;
+}
+
+function squareLineEndpoints(nx, ny, constant) {
+  const points = [];
+  const add = (x, y) => {
+    if (x < -1e-8 || x > 1 + 1e-8 || y < -1e-8 || y > 1 + 1e-8) return;
+    const point = [Math.min(1, Math.max(0, x)), Math.min(1, Math.max(0, y))];
+    if (!points.some(([px, py]) => Math.hypot(px - point[0], py - point[1]) <= 1e-7)) points.push(point);
+  };
+  if (Math.abs(ny) > 1e-9) {
+    add(0, constant / ny);
+    add(1, (constant - nx) / ny);
+  }
+  if (Math.abs(nx) > 1e-9) {
+    add(constant / nx, 0);
+    add((constant - ny) / nx, 1);
+  }
+  if (points.length < 2) return null;
+  let selected = [points[0], points[1]];
+  let maximumDistance = -1;
+  for (let a = 0; a < points.length; a += 1) {
+    for (let b = a + 1; b < points.length; b += 1) {
+      const distance = Math.hypot(points[a][0] - points[b][0], points[a][1] - points[b][1]);
+      if (distance > maximumDistance) {
+        maximumDistance = distance;
+        selected = [points[a], points[b]];
+      }
+    }
+  }
+  return maximumDistance > 1e-8 ? selected : null;
+}
+
+function parallelOffsetSmokeActions(fold) {
+  const vertices = Array.isArray(fold?.vertices_coords) ? fold.vertices_coords : [];
+  const edges = Array.isArray(fold?.edges_vertices) ? fold.edges_vertices : [];
+  const assignments = Array.isArray(fold?.edges_assignment) ? fold.edges_assignment : [];
+  const finiteVertices = vertices.filter((point) => Array.isArray(point)
+    && Number.isFinite(Number(point[0])) && Number.isFinite(Number(point[1])));
+  if (finiteVertices.length < 4) return [];
+  const xs = finiteVertices.map(([x]) => Number(x));
+  const ys = finiteVertices.map(([, y]) => Number(y));
+  const minX = Math.min(...xs);
+  const maxX = Math.max(...xs);
+  const minY = Math.min(...ys);
+  const maxY = Math.max(...ys);
+  const width = maxX - minX;
+  const height = maxY - minY;
+  if (width <= 1e-9 || height <= 1e-9) return [];
+  const groups = new Map();
+  for (let index = 0; index < edges.length; index += 1) {
+    if (assignments[index] !== "M" && assignments[index] !== "V") continue;
+    const [startIndex, endIndex] = edges[index] ?? [];
+    const start = vertices[startIndex];
+    const end = vertices[endIndex];
+    if (!Array.isArray(start) || !Array.isArray(end)) continue;
+    const a = [(Number(start[0]) - minX) / width, (Number(start[1]) - minY) / height];
+    const b = [(Number(end[0]) - minX) / width, (Number(end[1]) - minY) / height];
+    if (![...a, ...b].every(Number.isFinite)) continue;
+    let dx = b[0] - a[0];
+    let dy = b[1] - a[1];
+    const length = Math.hypot(dx, dy);
+    if (length <= 1e-9) continue;
+    dx /= length;
+    dy /= length;
+    if (dx < -1e-9 || (Math.abs(dx) <= 1e-9 && dy < 0)) {
+      dx *= -1;
+      dy *= -1;
+    }
+    const angle = Math.atan2(dy, dx);
+    const key = String(Math.round(angle * 1_000_000));
+    const nx = -dy;
+    const ny = dx;
+    const constant = nx * ((a[0] + b[0]) / 2) + ny * ((a[1] + b[1]) / 2);
+    const group = groups.get(key) ?? { key, nx, ny, entries: [] };
+    group.entries.push({ constant, assignment: assignments[index] });
+    groups.set(key, group);
+  }
+  const corners = [[0, 0], [1, 0], [1, 1], [0, 1]];
+  const actions = [];
+  const orderedGroups = [...groups.values()].sort((a, b) =>
+    b.entries.length - a.entries.length || Number(a.key) - Number(b.key));
+  for (const group of orderedGroups) {
+    const supports = corners.map(([x, y]) => group.nx * x + group.ny * y);
+    const supportMin = Math.min(...supports);
+    const supportMax = Math.max(...supports);
+    const ordered = [...group.entries].sort((a, b) => a.constant - b.constant);
+    const probes = [
+      { constant: (supportMin + ordered[0].constant) / 2, nearest: ordered[0] },
+      { constant: (supportMax + ordered.at(-1).constant) / 2, nearest: ordered.at(-1) },
+    ].filter(({ constant, nearest }) => Math.abs(constant - nearest.constant) > 1e-6);
+    for (const { constant, nearest } of probes) {
+      const endpoints = squareLineEndpoints(group.nx, group.ny, constant);
+      if (!endpoints) continue;
+      const assignment = nearest.assignment === "M" ? "V" : "M";
+      actions.push({
+        id: `parallel-offset-${group.key}-${constant.toFixed(8)}-${assignment}`,
+        type: "add_crease",
+        a: endpoints[0],
+        b: endpoints[1],
+        assignment,
+        construction: "parallel_offset_smoke_probe",
+        rationale: "既存の平行折り線群の外側に追加できるかを検証",
+      });
+    }
+  }
+  return actions;
+}
+
+function selectModifiabilitySmokeAction(fold, goal, document, bounds) {
+  const lines = Array.isArray(document?.lines) ? document.lines : [];
+  const seen = new Set();
+  const actions = [
+    ...parallelOffsetSmokeActions(fold),
+    ...enumerateFullWidthCreaseActions({ fold, depth: 0, goal }),
+  ].filter((action) => {
+    const points = [action.a, action.b]
+      .map(([x, y]) => `${Number(x).toFixed(7)},${Number(y).toFixed(7)}`)
+      .sort()
+      .join(":");
+    const key = `${points}:${action.assignment}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return actions
+    .map((action, index) => {
+      const [a, b] = [mapPaperPoint(action.a, bounds), mapPaperPoint(action.b, bounds)];
+      const intersections = lines.reduce((sum, line) => {
+        if (line?.color === "EDGE") return sum;
+        const c = [Number(line?.a?.x), Number(line?.a?.y)];
+        const d = [Number(line?.b?.x), Number(line?.b?.y)];
+        if (![...c, ...d].every(Number.isFinite)) return sum;
+        return sum + segmentIntersectionScore(a, b, c, d);
+      }, 0);
+      return { action, a, b, intersections, index };
+    })
+    .sort((a, b) => a.intersections - b.intersections || a.index - b.index)[0] ?? null;
+}
+
+export async function runOrieditaModifiabilitySmokeTest({
+  parentPath,
+  smokePath,
+  fold,
+  goal = null,
+  requestImpl = orieditaRequest,
+  waitImpl = waitForFold,
+  copyImpl = copyFile,
+  removeImpl = rm,
+} = {}) {
+  const result = {
+    schema: "oriai-oriedita-modifiability-smoke-v1",
+    status: "failed",
+    isolation: "temporary_fold_copy",
+    action: null,
+    intersection_score: null,
+    line_count_before: null,
+    line_count_after: null,
+    add_line_completed: false,
+    calculation_started: false,
+    violation_count: null,
+    oriedita_completed: false,
+    parent_reloaded: false,
+    temporary_copy_removed: false,
+    reason: "Orieditaの追加折り線スモークテストを完了できませんでした",
+  };
+  let operationError = null;
+  try {
+    if (typeof parentPath !== "string" || !parentPath || typeof smokePath !== "string" || !smokePath) {
+      throw new Error("スモークテスト用FOLDパスが不正です");
+    }
+    await copyImpl(parentPath, smokePath);
+    await requestImpl("/open", {
+      method: "POST",
+      body: JSON.stringify({ path: smokePath }),
+    });
+    const document = await requestImpl("/document");
+    result.line_count_before = Array.isArray(document?.lines) ? document.lines.length : null;
+    const bounds = documentPaperBounds(document);
+    const selected = selectModifiabilitySmokeAction(fold, goal, document, bounds);
+    if (!selected) throw new Error("重複しない追加折り線を作成できませんでした");
+    result.action = {
+      type: "add_crease",
+      a: selected.action.a,
+      b: selected.action.b,
+      assignment: selected.action.assignment,
+      key: selected.action.id,
+    };
+    result.intersection_score = selected.intersections;
+    await requestImpl("/line", {
+      method: "POST",
+      body: JSON.stringify({
+        ax: selected.a[0],
+        ay: selected.a[1],
+        bx: selected.b[0],
+        by: selected.b[1],
+        color: selected.action.assignment === "V" ? "VALLEY" : "MOUNTAIN",
+      }),
+    });
+    const documentAfter = await requestImpl("/document");
+    result.line_count_after = Array.isArray(documentAfter?.lines) ? documentAfter.lines.length : null;
+    if (!Number.isInteger(result.line_count_before)
+      || !Number.isInteger(result.line_count_after)
+      || result.line_count_after <= result.line_count_before) {
+      throw new Error("Orieditaで追加折り線の実在を確認できませんでした");
+    }
+    result.add_line_completed = true;
+    const calculation = await requestImpl("/fold-calculate", { method: "POST" });
+    result.calculation_started = calculation?.started === true;
+    result.violation_count = Number.isInteger(calculation?.violationCount)
+      && calculation.violationCount >= 0
+      ? calculation.violationCount
+      : null;
+    if (!result.calculation_started) {
+      throw new Error("追加後の平坦折り計算を開始できませんでした");
+    }
+    if (result.violation_count !== 0) {
+      throw new Error(result.violation_count == null
+        ? "追加後の局所平坦折り違反数を確認できませんでした"
+        : `追加後に局所平坦折り違反が${result.violation_count}件あります`);
+    }
+    const state = await waitImpl(30_000);
+    result.oriedita_completed = state?.foldedFigures?.completed === true;
+    if (!result.oriedita_completed) throw new Error("追加後の2D平坦折り計算が完了しませんでした");
+    result.status = "passed";
+    result.reason = "一時コピーへの折り線追加とOrieditaの2D平坦折り計算が完了";
+  } catch (error) {
+    operationError = error instanceof Error ? error.message : String(error);
+    result.status = "failed";
+    result.reason = operationError;
+  } finally {
+    try {
+      if (typeof parentPath === "string" && parentPath) {
+        await requestImpl("/open", {
+          method: "POST",
+          body: JSON.stringify({ path: parentPath }),
+        });
+        result.parent_reloaded = true;
+      }
+    } catch (error) {
+      const reloadError = error instanceof Error ? error.message : String(error);
+      result.status = "failed";
+      result.reason = operationError
+        ? `${operationError}; 親FOLDを再読込できませんでした: ${reloadError}`
+        : `親FOLDを再読込できませんでした: ${reloadError}`;
+    }
+    try {
+      if (typeof smokePath === "string" && smokePath) {
+        await removeImpl(smokePath, { force: true });
+        result.temporary_copy_removed = true;
+      }
+    } catch (error) {
+      const cleanupError = error instanceof Error ? error.message : String(error);
+      result.reason = `${result.reason}; 一時コピーを削除できませんでした: ${cleanupError}`;
+    }
+  }
+  if (!result.parent_reloaded) result.status = "failed";
+  return result;
+}
+
 async function ensureNodeFoldSnapshot(job, node) {
   const directory = stepNodeDirectory(job, node.id);
   const path = join(directory, "state.fold");
@@ -1123,7 +1429,7 @@ async function finalizeStepSearchResult(job, search) {
     body: JSON.stringify({ path: sourcePath }),
   });
   const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
-  if (!calculation?.started) throw new Error("最終候補に局所平坦折り違反があります");
+  assertSuccessfulFinalFoldCalculation(calculation);
   const state = await waitForFold(30_000);
   if (!state?.foldedFigures?.completed) throw new Error("最終候補の2D平坦折り計算が完了しませんでした");
 
@@ -1244,12 +1550,23 @@ async function runStepDesignLoop(job) {
 
 async function prepareCodexInitialFold(job) {
   const validations = [];
-  for (let index = 0; index < job.structuralMatches.length; index += 1) {
-    const match = job.structuralMatches[index];
+  const searchPool = job.structuralSearchPool?.length ? job.structuralSearchPool : job.structuralMatches;
+  let incrementalCandidatePassed = false;
+  for (let index = 0; index < searchPool.length && !incrementalCandidatePassed; index += 1) {
+    const match = searchPool[index];
     const candidatePath = join(job.directory, `structural-candidate-${String(index + 1).padStart(2, "0")}.fold`);
     const record = {
       pattern_id: match.pattern.id,
       family: match.pattern.family,
+      search_rank: index + 1,
+      similarity_score: match.score ?? null,
+      requires_modifiability_smoke_test: true,
+      incremental_modification_ready: false,
+      modifiability: {
+        schema: "oriai-oriedita-modifiability-smoke-v1",
+        status: "not_run",
+        reason: "平坦折り検証の通過後に実行します",
+      },
       status: "failed",
       oriedita_completed: false,
       violation_count: null,
@@ -1261,17 +1578,34 @@ async function prepareCodexInitialFold(job) {
         body: JSON.stringify({ path: candidatePath }),
       });
       const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
-      record.violation_count = Number(calculation?.violationCount ?? 0);
-      if (!calculation?.started || record.violation_count > 0) {
-        record.reason = calculation?.started
-          ? `局所平坦折り違反 ${record.violation_count}件`
-          : "Orieditaが平坦折り計算を開始できませんでした";
+      record.violation_count = Number.isInteger(calculation?.violationCount)
+        && calculation.violationCount >= 0
+        ? calculation.violationCount
+        : null;
+      if (!calculation?.started || record.violation_count !== 0) {
+        record.reason = !calculation?.started
+          ? "Orieditaが平坦折り計算を開始できませんでした"
+          : record.violation_count == null
+            ? "Orieditaの局所平坦折り違反数を確認できませんでした"
+            : `局所平坦折り違反 ${record.violation_count}件`;
       } else {
         const state = await waitForFold(30_000);
         record.oriedita_completed = state?.foldedFigures?.completed === true;
         record.status = record.oriedita_completed ? "passed" : "failed";
+        if (record.status === "passed") {
+          record.modifiability = await runOrieditaModifiabilitySmokeTest({
+            parentPath: candidatePath,
+            smokePath: join(job.directory, `.structural-smoke-${String(index + 1).padStart(2, "0")}.fold`),
+            fold: match.pattern.fold,
+            goal: job.goal,
+          });
+          record.incremental_modification_ready = record.modifiability.status === "passed";
+          incrementalCandidatePassed = record.incremental_modification_ready;
+        }
         record.reason = record.oriedita_completed
-          ? "Orieditaの2D平坦折り計算が完了"
+          ? record.incremental_modification_ready
+            ? "Orieditaの2D平坦折り計算と追加折り線スモークテストが完了"
+            : `Orieditaの2D平坦折り計算は完了しましたが追加折り線スモークテストは不合格: ${record.modifiability.reason}`
           : "Orieditaの2D平坦折り計算が完了しませんでした";
       }
     } catch (error) {
@@ -1279,14 +1613,32 @@ async function prepareCodexInitialFold(job) {
     }
     validations.push(record);
   }
-  const selected = chooseValidatedInitialFold(job.structuralMatches, validations, job.fallbackInitialFold);
+  const selected = chooseValidatedInitialFold(searchPool, validations, job.fallbackInitialFold, {
+    requireIncrementalModification: true,
+  });
   if (!selected.fold) throw new Error("初期FOLDを準備できませんでした");
   const initialPath = join(job.directory, "initial.fold");
   await writeFile(initialPath, `${JSON.stringify(selected.fold, null, 2)}\n`, { mode: 0o600 });
-  const structuralCandidates = job.references.structural_knowledge.candidates.map((candidate) => ({
+  const passedIds = new Set(validations.filter(({ status }) => status === "passed").map(({ pattern_id: patternId }) => patternId));
+  let visibleMatches = passedIds.size
+    ? searchPool.filter(({ pattern }) => passedIds.has(pattern.id)).slice(0, 3)
+    : searchPool.slice(0, 3);
+  const selectedMatch = searchPool.find(({ pattern }) => pattern.id === selected.pattern_id) ?? null;
+  if (selectedMatch && !visibleMatches.some(({ pattern }) => pattern.id === selected.pattern_id)) {
+    visibleMatches = [...visibleMatches.slice(0, 2), selectedMatch];
+  }
+  job.structuralMatches = visibleMatches;
+  job.knowledgeReferences = visibleMatches.map(publicKnowledgeReference);
+  const structuralCandidates = job.knowledgeReferences.map((candidate) => ({
     ...candidate,
     validation: validations.find(({ pattern_id: patternId }) => patternId === candidate.id) ?? null,
   }));
+  const selectedValidation = validations.find(({ pattern_id: patternId }) => patternId === selected.pattern_id) ?? null;
+  const selectionKind = selected.fallback
+    ? "square_fallback"
+    : selectedMatch?.validationFallback
+      ? "validation_fallback"
+      : "similarity_match";
   job.references = {
     ...job.references,
     structural_knowledge: {
@@ -1296,11 +1648,54 @@ async function prepareCodexInitialFold(job) {
         source: selected.source,
         pattern_id: selected.pattern_id,
         fallback: selected.fallback,
+        similarity_score: selectedMatch?.score ?? null,
+        similarity_reason: selectedMatch?.reason ?? null,
+        family: selectedMatch?.pattern?.family ?? null,
+        params: selectedMatch?.pattern?.params ?? null,
+        incremental_modification_ready: selectedValidation?.incremental_modification_ready === true,
+        incremental_modification_strategy: selectedValidation?.incremental_modification_ready
+          ? "oriedita_add_line_calculate_reload_smoke_test"
+          : null,
+        modifiability: selectedValidation?.modifiability ?? null,
+        search_rank: selected.pattern_id
+          ? searchPool.findIndex(({ pattern }) => pattern.id === selected.pattern_id) + 1
+          : null,
+        modification_mode: selected.fallback ? "square_fallback" : "modify_retrieved_fold",
+        selection_kind: selectionKind,
+      },
+    },
+  };
+  job.designBrief = {
+    ...job.designBrief,
+    design_inputs: {
+      ...job.designBrief.design_inputs,
+      structural_candidates: structuralCandidates.map((candidate) => ({
+        id: candidate.id,
+        title: candidate.title,
+        family: candidate.family,
+        params: candidate.params,
+        reason: candidate.reason,
+        score: candidate.score,
+        score_breakdown: candidate.scoreBreakdown,
+        validation: candidate.validation,
+      })),
+      structural_search: {
+        strategy: job.searchedPatternCount > 0
+          ? "prompt_to_design_features_then_rank_5000"
+          : "not_run",
+        searched_pattern_count: job.searchedPatternCount,
+        evaluated_candidate_count: validations.length,
+        selected_pattern_id: selected.pattern_id,
+        modification_mode: selected.fallback ? "square_fallback" : "modify_retrieved_fold",
+        selection_kind: selectionKind,
+        modifiability_validation: selectedValidation?.modifiability ?? null,
       },
     },
   };
   await Promise.all([
     writeFile(join(job.directory, "references.json"), `${JSON.stringify(job.references, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(job.directory, "design-brief.json"), `${JSON.stringify(job.designBrief, null, 2)}\n`, { mode: 0o600 }),
+    writeFile(join(job.directory, "knowledge-references.json"), `${JSON.stringify(job.knowledgeReferences, null, 2)}\n`, { mode: 0o600 }),
     writeFile(join(job.directory, "structural-validation.json"), `${JSON.stringify(validations, null, 2)}\n`, { mode: 0o600 }),
   ]);
   return initialPath;
@@ -1352,12 +1747,17 @@ async function runCodexDesignLoop(job) {
   ]);
 
   await access(finalFoldPath);
+  const [initialFold, codexFinalFold] = await Promise.all([
+    readFile(initialFoldPath, "utf8").then(JSON.parse),
+    readFile(finalFoldPath, "utf8").then(JSON.parse),
+  ]);
+  assertInitialCreasesPreserved(initialFold, codexFinalFold);
   await orieditaRequest("/open", {
     method: "POST",
     body: JSON.stringify({ path: finalFoldPath }),
   });
   const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
-  if (!calculation?.started) throw new Error("Codexの最終候補に局所平坦折り違反があります");
+  const finalViolationCount = assertSuccessfulFinalFoldCalculation(calculation, "Codexの最終候補");
   const state = await waitForFold(30_000);
   if (!state?.foldedFigures?.completed) throw new Error("Codexの最終候補をOrieditaで計算できませんでした");
   await Promise.all([
@@ -1384,7 +1784,7 @@ async function runCodexDesignLoop(job) {
     issues: codexEvaluation.issues,
     mode: "codex_oriedita_mcp_loop",
     physical: {
-      score: Number(calculation?.violationCount) > 0 ? 0 : 100,
+      score: finalViolationCount > 0 ? 0 : 100,
       orieditaCompleted: true,
       scope: "oriedita_flat_fold_2d",
     },
@@ -1394,7 +1794,7 @@ async function runCodexDesignLoop(job) {
       dimensions: "2d_folded_figure_reviewed_by_codex",
     },
     foldability: {
-      score: Number(calculation?.violationCount) > 0 ? 0 : 100,
+      score: finalViolationCount > 0 ? 0 : 100,
       layerCount: "unknown",
       clearanceIsProxy: true,
     },
@@ -1641,7 +2041,7 @@ async function handle(request, response) {
 }
 
 await mkdir(workRoot, { recursive: true, mode: 0o700 });
-const server = createServer((request, response) => {
+export const server = createServer((request, response) => {
   void handle(request, response).catch((error) => {
     const status = error instanceof HttpError || error instanceof ApiInputError ? error.status : 500;
     const message = error instanceof Error ? error.message : "サーバーエラー";
