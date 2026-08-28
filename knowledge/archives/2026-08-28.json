@@ -1,0 +1,31 @@
+{
+  "schema": "oriai-knowledge-archive-v1",
+  "created_at": "2026-08-28",
+  "repository": "https://github.com/yuka-718/oriai",
+  "release": "https://github.com/yuka-718/oriai/releases/tag/knowledge-archive-2026-08-28",
+  "asset": {
+    "name": "oriai_training_knowledge_snapshot_2026-08-28.zip",
+    "url": "https://github.com/yuka-718/oriai/releases/download/knowledge-archive-2026-08-28/oriai_training_knowledge_snapshot_2026-08-28.zip",
+    "bytes": 390750553,
+    "sha256": "c00c6379c38cb7a4760ace8cf2758bc4104777490ca89bd5e07f119d9dfe6ff5"
+  },
+  "contents": {
+    "origami_search_works": 625,
+    "origami_search_local_files": 3678,
+    "origami_search_local_bytes_approx": 358000000,
+    "extraction_and_verification_files": 11,
+    "approved_training_records": 0,
+    "structural_knowledge_records": 5157,
+    "fold_cp_candidate_records": 5000,
+    "source_archives": [
+      "origami_cp_world_collection_2026-08-24.zip",
+      "origami_search_additional_3000_2026-08-27.zip",
+      "origami_fold_cp_candidates_5000_2026-08-28.zip"
+    ]
+  },
+  "limitations": {
+    "finished_models_claimed": false,
+    "human_verified_folding_steps_claimed": false,
+    "physical_foldability_guaranteed": false
+  }
+}
