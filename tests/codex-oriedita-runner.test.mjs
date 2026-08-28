@@ -422,6 +422,8 @@ test("Codex exec uses JSONL with isolated stdout parsing and noninteractive safe
   assert.match(source, /mcp_servers\.oriedita\.default_tools_approval_mode=\\"approve\\"/);
   assert.match(source, /mcp_servers\.oriedita\.enabled_tools=/);
   assert.match(source, /restricted-oriedita-mcp\.mjs/);
+  assert.match(source, /"--disable", "code_mode"/);
+  assert.match(source, /"--disable", "shell_tool"/);
   assert.match(source, /ORIAI_ORIEDITA_PATH_MAPPINGS/);
   assert.match(source, /mcp_servers\.oriedita\.env\.ORIAI_ORIEDITA_MCP_UPSTREAM/);
   assert.doesNotMatch(source, /--approve-for-me/);

@@ -713,6 +713,8 @@ export async function runCodexOrieditaLoop({
     "--disable", "skill_search",
     "--disable", "recommended_plugins",
     "--disable", "hooks",
+    "--disable", "code_mode",
+    "--disable", "shell_tool",
     "--cd", resolve(directory),
     "--output-schema", resolve(schemaPath),
     "--output-last-message", outputPath,
