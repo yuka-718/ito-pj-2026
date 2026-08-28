@@ -138,18 +138,30 @@ async function waitForJob(id: string, onMessage: (message: string) => void) {
   let transientFailures = 0;
   for (let attempt = 0; attempt < 720; attempt += 1) {
     await new Promise((resolve) => window.setTimeout(resolve, attempt < 3 ? 1200 : 2500));
+
+    let response: Response;
     try {
-      const response = await apiFetch(`/jobs/${id}`);
-      const payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
-      if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理状況を取得できませんでした");
-      transientFailures = 0;
-      onMessage(payload.job.message);
-      if (payload.job.status === "done" && payload.job.result) return payload.job.result;
-      if (payload.job.status === "failed") throw new Error(payload.job.error ?? "生成に失敗しました");
+      response = await apiFetch(`/jobs/${id}`);
     } catch (error) {
       transientFailures += 1;
       if (transientFailures > 12) throw error;
+      continue;
     }
+
+    let payload: { ok: boolean; job?: LocalJob; error?: string };
+    try {
+      payload = await response.json() as { ok: boolean; job?: LocalJob; error?: string };
+    } catch (error) {
+      transientFailures += 1;
+      if (transientFailures > 12) throw error;
+      continue;
+    }
+
+    if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理状況を取得できませんでした");
+    transientFailures = 0;
+    onMessage(payload.job.message);
+    if (payload.job.status === "done" && payload.job.result) return payload.job.result;
+    if (payload.job.status === "failed") throw new Error(payload.job.error ?? "生成に失敗しました");
   }
   throw new Error("生成処理がタイムアウトしました");
 }

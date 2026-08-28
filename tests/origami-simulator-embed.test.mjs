@@ -62,6 +62,19 @@ test("application waits for the Codex and Oriedita job before showing either res
   assert.match(page, /CodexがOrieditaを操作・評価中/);
 });
 
+test("terminal job failures bypass transient polling retries", async () => {
+  const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+  const waitForJob = page.slice(
+    page.indexOf("async function waitForJob"),
+    page.indexOf("export default function Home"),
+  );
+  const terminalFailure = waitForJob.indexOf('payload.job.status === "failed"');
+
+  assert.notEqual(terminalFailure, -1);
+  assert.ok(terminalFailure > waitForJob.lastIndexOf("catch (error)"));
+  assert.match(waitForJob, /catch \(error\) \{\s*transientFailures \+= 1;\s*if \(transientFailures > 12\) throw error;\s*continue;\s*\}/);
+});
+
 test("embed removes analytics and exposes only the WebGL canvas", async () => {
   const [html, css] = await Promise.all([
     readFile(new URL("index.html", simulatorRoot), "utf8"),

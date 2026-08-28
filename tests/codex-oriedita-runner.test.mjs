@@ -18,6 +18,7 @@ import {
   normalizeCodexLoopResult,
   normalizeReferencePaths,
   parseCodexJsonlEvent,
+  shouldRetryCodexOrieditaAttempt,
 } from "../local-oriedita/codex-oriedita-runner.mjs";
 
 function mcpEvent(tool, {
@@ -106,6 +107,39 @@ test("Codex loop prompt requires one crease, fold calculation, image review when
   assert.match(prompt, /既存線と交差しない平行線だけ/);
   assert.match(prompt, /最高点を厳密に上回った候補だけ/);
   assert.match(prompt, /同点または悪化した候補は必ず accepted=false/);
+  assert.match(prompt, /最初のツール呼び出しは必ず oriedita\.get_status/);
+  assert.match(prompt, /list_mcp_resources、list_mcp_resource_templates、read_mcp_resource.*呼んではいけません/);
+  assert.match(prompt, /リソース一覧が空でもOrieditaツールが利用できないとは判断しない/);
+});
+
+test("Codex retry is eligible only after a completed first attempt with no Oriedita call", () => {
+  const tracker = createCodexOperationTracker({ maximumIterations: 10 });
+  tracker.ingestLine(JSON.stringify({
+    type: "item.completed",
+    item: { type: "mcp_tool_call", server: "codex", tool: "list_mcp_resources", status: "completed" },
+  }));
+  const emptySnapshot = tracker.snapshot();
+  assert.equal(shouldRetryCodexOrieditaAttempt(emptySnapshot), true);
+  assert.equal(shouldRetryCodexOrieditaAttempt(null), false);
+  assert.equal(shouldRetryCodexOrieditaAttempt(emptySnapshot, { attemptNumber: 2 }), false);
+  assert.equal(shouldRetryCodexOrieditaAttempt(emptySnapshot, { processCompleted: false }), false);
+
+  tracker.ingestLine(JSON.stringify({
+    type: "item.started",
+    item: { type: "mcp_tool_call", server: "oriedita", tool: "get_status" },
+  }));
+  assert.equal(shouldRetryCodexOrieditaAttempt(tracker.snapshot()), false);
+});
+
+test("Codex retry is never eligible after add, calculation, or figure evaluation starts", () => {
+  for (const tool of ["add_line", "calculate_fold", "get_folded_figure"]) {
+    const tracker = createCodexOperationTracker({ maximumIterations: 10 });
+    tracker.ingestLine(JSON.stringify({
+      type: "item.started",
+      item: { type: "mcp_tool_call", server: "oriedita", tool },
+    }));
+    assert.equal(shouldRetryCodexOrieditaAttempt(tracker.snapshot()), false, tool);
+  }
 });
 
 test("normalization preserves exactly ten evaluations and clamps scores", () => {
@@ -395,6 +429,12 @@ test("Codex exec uses JSONL with isolated stdout parsing and noninteractive safe
   assert.match(source, /child\.stderr\.on\("data", writeStderr\)/);
   assert.match(source, /child\.once\("close"/);
   assert.match(source, /if \(stdoutBuffer\.trim\(\)\) tracker\.ingestLine\(stdoutBuffer\)/);
+  assert.match(source, /const deadlineAt = Date\.now\(\) \+ Math\.max/);
+  assert.match(source, /detached: useProcessGroup/);
+  assert.match(source, /process\.kill\(-child\.pid, signal\)/);
+  assert.match(source, /terminate\("SIGTERM"\)/);
+  assert.match(source, /terminate\("SIGKILL"\)/);
+  assert.match(source, /if \(timedOut\) rejectRun/);
   assert.match(source, /assertCodexOperationSnapshot\(operationSnapshot/);
   assert.match(source, /assertCodexDecisionEvidence\(factualSteps, operationSnapshot/);
 });

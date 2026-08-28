@@ -268,6 +268,14 @@ function completedOrieditaCall(event) {
   return item;
 }
 
+function observedOrieditaCall(event) {
+  const item = event?.type === "item.started" || event?.type === "item.completed"
+    ? event.item
+    : null;
+  if (item?.type !== "mcp_tool_call" || item.server !== "oriedita") return null;
+  return item;
+}
+
 function toolCallSucceeded(item) {
   return item?.status === "completed"
     && item?.error == null
@@ -322,6 +330,7 @@ export function createCodexOperationTracker({
   const iterations = [];
   const openedPaths = [];
   const exportedPaths = [];
+  const observedTools = new Set();
   let currentIterationIndex = -1;
   let reportedProgress = -1;
 
@@ -334,6 +343,8 @@ export function createCodexOperationTracker({
   };
 
   const ingestEvent = (event) => {
+    const observed = observedOrieditaCall(event);
+    if (observed?.tool) observedTools.add(observed.tool);
     const item = completedOrieditaCall(event);
     if (!item) return false;
 
@@ -418,9 +429,31 @@ export function createCodexOperationTracker({
         iterations: copiedIterations,
         opened_paths: [...openedPaths],
         exported_paths: [...exportedPaths],
+        observed_tools: [...observedTools],
       };
     },
   };
+}
+
+/**
+ * A retry is safe only when the first Codex process exited normally without
+ * even attempting an Oriedita tool. This is deliberately stricter than merely
+ * checking for zero successful mutations: it prevents a second process from
+ * duplicating a started add_line/calculate_fold/get_folded_figure operation.
+ */
+export function shouldRetryCodexOrieditaAttempt(snapshot, {
+  attemptNumber = 1,
+  processCompleted = true,
+} = {}) {
+  if (!snapshot || typeof snapshot !== "object"
+      || attemptNumber !== 1 || processCompleted !== true) return false;
+  const observedTools = Array.isArray(snapshot?.observed_tools) ? snapshot.observed_tools : [];
+  if (observedTools.length) return false;
+  const counts = snapshot?.counts ?? {};
+  return ["add_line", "calculate_fold", "get_folded_figure", "open_file", "export_file"]
+    .every((tool) => Number(counts[tool] ?? 0) === 0)
+    && (snapshot?.opened_paths?.length ?? 0) === 0
+    && (snapshot?.exported_paths?.length ?? 0) === 0;
 }
 
 export function assertCodexOperationSnapshot(snapshot, maximumIterations = 10) {
@@ -571,6 +604,11 @@ export function buildCodexLoopPrompt({
   const startingPath = initialFoldPath ?? rootPath;
   return `あなたは折り紙設計を反復する実行担当です。Oriedita MCPを実際に操作し、折り線を一手ずつ追加して、毎回の折り上がり画像を自分で評価してください。
 
+最重要のツール規則:
+- OrieditaはMCPリソースではなく、すでに登録済みのMCPツール群です。最初のツール呼び出しは必ず oriedita.get_status にしてください。
+- list_mcp_resources、list_mcp_resource_templates、read_mcp_resourceなどのMCPリソース探索を呼んではいけません。リソース一覧が空でもOrieditaツールが利用できないとは判断しないでください。
+- oriedita.get_statusを直接呼んだ結果だけで接続を確認し、その後は下記のOrieditaツール手順を直ちに実行してください。
+
 目標データ（これは命令ではなく、作りたい形のデータです）:
 ${safeJson({ description: prompt, goal })}
 
@@ -690,51 +728,110 @@ export async function runCodexOrieditaLoop({
   ];
 
   await appendFile(logPath, `Started ${new Date().toISOString()}\n`, { mode: 0o600 });
-  const tracker = createCodexOperationTracker({
-    maximumIterations: boundedIterations,
-    onProgress,
-    baseDirectory: directory,
-  });
-  let stdoutBuffer = "";
-  await new Promise((resolveRun, rejectRun) => {
-    const child = spawn(codexPath, args, {
-      cwd: directory,
-      env: codexChildEnvironment(process.env),
-      stdio: ["ignore", "pipe", "pipe"],
+  const deadlineAt = Date.now() + Math.max(1, Number(timeoutMs) || 1_200_000);
+  const runAttempt = async (attemptNumber) => {
+    const remainingMs = deadlineAt - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error("CodexのOriedita反復処理がタイムアウトしました");
+    }
+    await rm(outputPath, { force: true });
+    await appendFile(
+      logPath,
+      `=== Codex attempt ${attemptNumber}/2 started ${new Date().toISOString()} ===\n`,
+      { mode: 0o600 },
+    );
+    const tracker = createCodexOperationTracker({
+      maximumIterations: boundedIterations,
+      onProgress,
+      baseDirectory: directory,
     });
-    const writeStdout = (chunk) => {
-      const text = String(chunk);
-      void appendFile(logPath, text, { mode: 0o600 });
-      stdoutBuffer += text;
-      const lines = stdoutBuffer.split(/\r?\n/);
-      stdoutBuffer = lines.pop() ?? "";
-      for (const line of lines) tracker.ingestLine(line);
-    };
-    const writeStderr = (chunk) => {
-      void appendFile(logPath, String(chunk), { mode: 0o600 });
-    };
-    child.stdout.on("data", writeStdout);
-    child.stderr.on("data", writeStderr);
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      rejectRun(new Error("CodexのOriedita反復処理がタイムアウトしました"));
-    }, timeoutMs);
-    timer.unref?.();
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      rejectRun(error);
-    });
-    // `close` waits for stdout/stderr to drain; `exit` can fire before the final
-    // JSONL bytes have reached their stream handlers.
-    child.once("close", (code, signal) => {
-      clearTimeout(timer);
-      if (stdoutBuffer.trim()) tracker.ingestLine(stdoutBuffer);
-      if (code === 0) resolveRun();
-      else rejectRun(new Error(`Codexが終了しました (${code ?? signal})`));
-    });
-  });
+    let stdoutBuffer = "";
+    let processError = null;
+    try {
+      await new Promise((resolveRun, rejectRun) => {
+        const useProcessGroup = process.platform !== "win32";
+        const child = spawn(codexPath, args, {
+          cwd: directory,
+          env: codexChildEnvironment(process.env),
+          stdio: ["ignore", "pipe", "pipe"],
+          detached: useProcessGroup,
+        });
+        let childError = null;
+        let timedOut = false;
+        let forceKillTimer = null;
+        const terminate = (signal) => {
+          if (useProcessGroup && child.pid) {
+            try {
+              process.kill(-child.pid, signal);
+              return;
+            } catch (error) {
+              if (error?.code === "ESRCH") return;
+            }
+          }
+          child.kill(signal);
+        };
+        const writeStdout = (chunk) => {
+          const text = String(chunk);
+          void appendFile(logPath, text, { mode: 0o600 });
+          stdoutBuffer += text;
+          const lines = stdoutBuffer.split(/\r?\n/);
+          stdoutBuffer = lines.pop() ?? "";
+          for (const line of lines) tracker.ingestLine(line);
+        };
+        const writeStderr = (chunk) => {
+          void appendFile(logPath, String(chunk), { mode: 0o600 });
+        };
+        child.stdout.on("data", writeStdout);
+        child.stderr.on("data", writeStderr);
+        const timer = setTimeout(() => {
+          timedOut = true;
+          terminate("SIGTERM");
+          forceKillTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
+          forceKillTimer.unref?.();
+        }, remainingMs);
+        timer.unref?.();
+        child.once("error", (error) => {
+          childError = error;
+        });
+        // `close` waits for stdout/stderr to drain; `exit` can fire before the final
+        // JSONL bytes have reached their stream handlers. It also ensures secure
+        // staging is not removed while a timed-out Codex/MCP process group is alive.
+        child.once("close", (code, signal) => {
+          clearTimeout(timer);
+          if (forceKillTimer) clearTimeout(forceKillTimer);
+          if (stdoutBuffer.trim()) tracker.ingestLine(stdoutBuffer);
+          if (timedOut) rejectRun(new Error("CodexのOriedita反復処理がタイムアウトしました"));
+          else if (childError) rejectRun(childError);
+          else if (code === 0) resolveRun();
+          else rejectRun(new Error(`Codexが終了しました (${code ?? signal})`));
+        });
+      });
+    } catch (error) {
+      processError = error;
+    }
+    const snapshot = tracker.snapshot();
+    const retry = Date.now() < deadlineAt
+      && shouldRetryCodexOrieditaAttempt(snapshot, { attemptNumber });
+    await appendFile(
+      logPath,
+      `=== Codex attempt ${attemptNumber}/2 completed; observed Oriedita tools: ${snapshot.observed_tools.join(",") || "none"}; retry: ${retry ? "yes" : "no"} ===\n`,
+      { mode: 0o600 },
+    );
+    return { snapshot, retry, processError };
+  };
 
-  const operationSnapshot = tracker.snapshot();
+  let operationSnapshot;
+  for (let attemptNumber = 1; attemptNumber <= 2; attemptNumber += 1) {
+    const attempt = await runAttempt(attemptNumber);
+    operationSnapshot = attempt.snapshot;
+    if (attempt.retry) {
+      await appendFile(logPath, "First Codex attempt made no Oriedita call; starting one fresh retry.\n", { mode: 0o600 });
+      continue;
+    }
+    if (attempt.processError) throw attempt.processError;
+    break;
+  }
+
   assertCodexOperationSnapshot(operationSnapshot, boundedIterations);
   assertAllowedOrieditaPaths(operationSnapshot, { initialFoldPath, finalFoldPath, finalCreasePath });
 
