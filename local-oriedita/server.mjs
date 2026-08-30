@@ -48,6 +48,13 @@ import {
   runCodexOrieditaLoop,
 } from "./codex-oriedita-runner.mjs";
 import {
+  ORIAI_FINAL_EVALUATOR_MODEL,
+  ORIAI_FINAL_JUDGE_COUNT,
+  ORIAI_INTERMEDIATE_EVALUATOR_MODEL,
+  ORIAI_OPERATOR_MODEL,
+  runIndependentVisualEvaluation,
+} from "./codex-visual-evaluator.mjs";
+import {
   ApiInputError,
   createOpenApiDocument,
   ORIEDITA_API_VERSION,
@@ -70,6 +77,8 @@ const codexBatchIterations = 10;
 const evaluationLimit = null;
 const maxCycles = 10;
 const targetScore = 99;
+const codexReviewTrigger = 0;
+const independentEvaluationMode = "independent_codex_rubric_v1";
 const configuredDesignMode = process.env.ORI_AI_DESIGN_MODE?.trim();
 const designMode = configuredDesignMode === "regeneration" || configuredDesignMode === "crease_step_search"
   ? configuredDesignMode
@@ -936,7 +945,7 @@ function publicJob(job) {
       maxSteps: hasMaxSteps ? job.maxSteps : hasMaxCycles ? job.maxCycles : maxCycles,
       evaluationLimit: job.designMode === "codex_mcp_loop" ? evaluationLimit : (hasMaxSteps ? job.maxSteps : maxCycles),
       batchSize: job.designMode === "codex_mcp_loop" ? codexBatchIterations : null,
-      targetScore: job.designMode === "codex_mcp_loop" ? targetScore : null,
+      targetScore: job.designMode === "codex_mcp_loop" ? codexReviewTrigger : null,
       evaluatedNodes: job.evaluatedNodes ?? 0,
       mode: job.designMode ?? designMode,
     } : null,
@@ -2544,7 +2553,17 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
     && finiteInteger(job.step) >= finiteInteger(persistedOperationSummary.evaluations_completed);
   let operationSummary = checkpoint?.schema === "oriai-codex-checkpoint-v1"
     ? checkpoint.operation_summary
-    : legacySummaryIsCommitted ? persistedOperationSummary : createCodexOperationSummary();
+    : legacySummaryIsCommitted
+      ? persistedOperationSummary
+      : createCodexOperationSummary({ requiredTargetScore: codexReviewTrigger });
+  if (finiteInteger(operationSummary?.target_score, targetScore) !== codexReviewTrigger) {
+    operationSummary = {
+      ...operationSummary,
+      target_score: codexReviewTrigger,
+      best_score: -1,
+      target_reached: false,
+    };
+  }
   await synchronizeCodexCheckpointLogs(job.directory, checkpoint);
   const expectedActionCount = finiteInteger(operationSummary.batches_completed) * codexBatchIterations;
   const persistedActionHistory = await loadPersistedCodexActionHistory(
@@ -2585,7 +2604,7 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
     startingBatchNumber: finiteInteger(operationSummary.batches_completed),
     startingBestStep: finiteInteger(operationSummary.best_step),
     batchSize: codexBatchIterations,
-    requiredTargetScore: targetScore,
+    requiredTargetScore: codexReviewTrigger,
     maximumBatches: 1,
     signal,
     runBatch: async ({ batchNumber, startingBestScore, iterationOffset }) => {
@@ -2625,7 +2644,7 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
       };
       job.cycle = batchNumber;
       job.bestScore = startingBestScore >= 0 ? startingBestScore : null;
-      job.message = `CodexがOrieditaを操作・画像評価中（${iterationOffset}回評価済み）`;
+      job.message = `TerraがOrieditaを操作中（${iterationOffset}候補を確認済み）`;
       const evaluation = await runCodexOrieditaLoop({
         directory: batchDirectory,
         prompt: job.prompt,
@@ -2639,10 +2658,11 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
         maximumIterations: codexBatchIterations,
         startingBestScore,
         iterationOffset,
-        targetScore,
+        targetScore: codexReviewTrigger,
         priorAttemptsSummary: {
           ...buildPriorAttemptsSummary(recentIterationRecords, operationSummary),
           incomplete_batch_attempts: incompleteBatchAttempts,
+          independent_review: await readJsonIfPresent(join(job.directory, "latest-independent-review.json")),
         },
         previousActionKeys: [...batchStartingActionKeys],
         onActionAttempt: persistActionEvent,
@@ -2653,7 +2673,7 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
         signal,
         onProgress: (localStep) => {
           job.step = iterationOffset + localStep;
-          job.message = `CodexがOrieditaを操作・画像評価中（${job.step}回評価）`;
+          job.message = `TerraがOrieditaを操作中（${job.step}候補を確認）`;
         },
       });
       return {
@@ -2798,7 +2818,7 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
   });
 
   if (!loop.targetReached) {
-    job.message = `次の評価バッチを待機中（${loop.evaluationsCompleted}回評価済み）`;
+    job.message = `次の操作バッチを待機中（${loop.evaluationsCompleted}候補を確認済み）`;
     return JOB_REQUEUE;
   }
   throwIfJobCancelled(job, signal);
@@ -2807,31 +2827,167 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
     String(loop.batchesCompleted).padStart(6, "0"),
     "evaluation.json",
   ));
-  if (!lastBatchEvaluation?.target_reached || finiteInteger(lastBatchEvaluation?.score, -1) < targetScore) {
-    throw new Error(`Codexの実証済み評価が${targetScore}点に到達していません`);
+  if (!lastBatchEvaluation?.target_reached
+      || finiteInteger(lastBatchEvaluation?.score, -1) < codexReviewTrigger) {
+    throw new Error("操作担当が独立審査へ渡す候補を確定できませんでした");
   }
-  if (!currentBestCreasePath) throw new Error("Codexの最良展開図を確認できません");
+  if (!currentBestCreasePath) throw new Error("操作担当の候補展開図を確認できません");
 
-  // Canonical public artifacts do not exist until the evidenced score reaches
-  // the target. A failed batch therefore cannot overwrite a previously valid
-  // best version or expose a provisional result through the jobs API.
-  await copyFileAtomically(currentBestFoldPath, finalFoldPath);
-  const codexFinalFold = await readFile(finalFoldPath, "utf8").then(JSON.parse);
-  assertInitialCreasesPreserved(initialFold, codexFinalFold);
+  // Public artifacts are not created from the operator's provisional score.
+  // First render the candidate, then hand only its finished image, the goal,
+  // and (when supplied) the user's reference image to fresh judge processes.
+  const independentDirectory = join(
+    job.directory,
+    "independent-evaluations",
+    String(loop.batchesCompleted).padStart(6, "0"),
+  );
+  const reviewFoldedPath = join(independentDirectory, "candidate-folded.png");
+  const independentBestFoldPath = join(job.directory, "independent-best.fold");
+  const independentBestCreasePath = join(job.directory, "independent-best-crease.png");
+  const independentBestFoldedPath = join(job.directory, "independent-best-folded.png");
+  await mkdir(independentDirectory, { recursive: true, mode: 0o700 });
+  const candidateFold = await readFile(currentBestFoldPath, "utf8").then(JSON.parse);
+  assertInitialCreasesPreserved(initialFold, candidateFold);
   await orieditaRequest("/open", {
     method: "POST",
-    body: JSON.stringify({ path: finalFoldPath }),
+    body: JSON.stringify({ path: currentBestFoldPath }),
   });
   const calculation = await orieditaRequest("/fold-calculate", { method: "POST" });
-  const finalViolationCount = assertSuccessfulFinalFoldCalculation(calculation, "Codexの99点最終候補");
+  const finalViolationCount = assertSuccessfulFinalFoldCalculation(calculation, "独立審査候補");
   const state = await waitForFold(30_000);
-  if (!state?.foldedFigures?.completed) throw new Error("Codexの99点最終候補をOrieditaで計算できませんでした");
+  if (!state?.foldedFigures?.completed) throw new Error("独立審査候補をOrieditaで計算できませんでした");
+  const foldedFigure = await orieditaRequest("/folded-figure");
+  const foldedBytes = Buffer.from(foldedFigure.data, "base64");
+  await writeFileAtomically(reviewFoldedPath, foldedBytes);
+
+  const previousBestImagePath = await access(independentBestFoldedPath)
+    .then(() => independentBestFoldedPath)
+    .catch(() => null);
+  job.message = "独立したTerraが完成画像を0〜5基準と二者比較で確認中";
+  const intermediateEvaluation = await runIndependentVisualEvaluation({
+    directory: independentDirectory,
+    candidateImagePath: reviewFoldedPath,
+    referenceImagePath: job.referencePath,
+    bestImagePath: previousBestImagePath,
+    prompt: job.prompt,
+    goal: job.goal,
+    stage: "intermediate",
+    judgeCount: 1,
+    model: ORIAI_INTERMEDIATE_EVALUATOR_MODEL,
+    reasoningEffort: "medium",
+    timeoutMs: jobTimeoutMs,
+    signal,
+  });
+  const currentWinsPairwise = !previousBestImagePath
+    || intermediateEvaluation.pairwisePreference === "current";
+  const shouldRunFinalEvaluation = intermediateEvaluation.passed && currentWinsPairwise;
+  let finalVisualEvaluation = null;
+  if (shouldRunFinalEvaluation) {
+    job.message = `独立したSolが履歴を見ずに最終審査中（${ORIAI_FINAL_JUDGE_COUNT}回）`;
+    finalVisualEvaluation = await runIndependentVisualEvaluation({
+      directory: independentDirectory,
+      candidateImagePath: reviewFoldedPath,
+      referenceImagePath: job.referencePath,
+      bestImagePath: null,
+      prompt: job.prompt,
+      goal: job.goal,
+      stage: "final",
+      judgeCount: ORIAI_FINAL_JUDGE_COUNT,
+      model: ORIAI_FINAL_EVALUATOR_MODEL,
+      reasoningEffort: "high",
+      timeoutMs: jobTimeoutMs,
+      signal,
+    });
+  }
+
+  const independentPassed = finalVisualEvaluation?.passed === true;
+  const reviewRecord = {
+    schema: "oriai-independent-review-round-v1",
+    round: loop.batchesCompleted,
+    operatorProvisionalScore: loop.bestScore,
+    physical: {
+      foldCompleted: state.foldedFigures.completed === true,
+      forbiddenOperationsAbsent: true,
+      violationFree: finalViolationCount === 0,
+      violationCount: finalViolationCount,
+      passed: state.foldedFigures.completed === true && finalViolationCount === 0,
+    },
+    intermediate: intermediateEvaluation,
+    final: finalVisualEvaluation,
+    passed: independentPassed,
+    evaluatedAt: new Date().toISOString(),
+  };
+  await Promise.all([
+    writeFileAtomically(
+      join(independentDirectory, "review.json"),
+      `${JSON.stringify(reviewRecord, null, 2)}\n`,
+    ),
+    writeFileAtomically(
+      join(job.directory, "latest-independent-review.json"),
+      `${JSON.stringify(reviewRecord, null, 2)}\n`,
+    ),
+  ]);
+
+  if (!independentPassed) {
+    if (currentWinsPairwise) {
+      await Promise.all([
+        copyFileAtomically(currentBestFoldPath, independentBestFoldPath),
+        copyFileAtomically(currentBestCreasePath, independentBestCreasePath),
+        copyFileAtomically(reviewFoldedPath, independentBestFoldedPath),
+      ]);
+    } else {
+      await Promise.all([
+        copyFileAtomically(independentBestFoldPath, currentBestFoldPath),
+        copyFileAtomically(independentBestCreasePath, currentBestCreasePath),
+      ]);
+    }
+    const candidateIndependentScore = Math.max(
+      0,
+      finiteInteger((finalVisualEvaluation ?? intermediateEvaluation).normalizedScore),
+    );
+    const previousIndependentScore = Math.max(0, finiteInteger(operationSummary.independent_best_score));
+    const independentScore = currentWinsPairwise
+      ? candidateIndependentScore
+      : previousIndependentScore;
+    operationSummary = {
+      ...operationSummary,
+      best_score: -1,
+      target_reached: false,
+      independent_best_score: independentScore,
+      independent_review_rounds: finiteInteger(operationSummary.independent_review_rounds) + 1,
+    };
+    job.bestScore = independentScore;
+    job.message = `独立審査は未合格。指摘を反映して次の候補を探索します（${loop.evaluationsCompleted}候補確認済み）`;
+    await Promise.all([
+      writeFileAtomically(
+        join(job.directory, "operation-summary.json"),
+        `${JSON.stringify(operationSummary, null, 2)}\n`,
+      ),
+      writeFileAtomically(
+        join(job.directory, "codex-checkpoint.json"),
+        `${JSON.stringify({
+          schema: "oriai-codex-checkpoint-v1",
+          operation_summary: operationSummary,
+          recent_iterations: recentIterationRecords,
+          design_brief: completedBrief,
+          current_best_fold: currentBestFoldPath,
+          current_best_crease: currentBestCreasePath,
+          action_history_count: attemptedActionKeys.size,
+          action_history_file: "action-history.jsonl",
+          independent_review: reviewRecord,
+          updated_at: new Date().toISOString(),
+        }, null, 2)}\n`,
+      ),
+    ]);
+    return JOB_REQUEUE;
+  }
+
+  // Only the three-run independent Sol verdict can create public artifacts.
+  await copyFileAtomically(currentBestFoldPath, finalFoldPath);
   await Promise.all([
     orieditaRequest("/export", { method: "POST", body: JSON.stringify({ path: finalFoldPath }) }),
     orieditaRequest("/export", { method: "POST", body: JSON.stringify({ path: finalCreasePath }) }),
   ]);
-  const foldedFigure = await orieditaRequest("/folded-figure");
-  const foldedBytes = Buffer.from(foldedFigure.data, "base64");
   await writeFileAtomically(finalFoldedPath, foldedBytes);
   const cycles = recentIterationRecords.map((step) => ({
     cycle: step.step,
@@ -2843,24 +2999,28 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
     action: step.action,
     summary: step.summary,
   }));
-  const lastEvaluation = lastBatchEvaluation;
   const evaluation = {
-    score: loop.bestScore,
+    score: finalVisualEvaluation.normalizedScore,
     iterations: loop.evaluationsCompleted,
     batches: loop.batchesCompleted,
-    stop_reason: "target_score_reached",
-    summary: lastEvaluation.summary,
-    issues: lastEvaluation.issues,
-    mode: "codex_oriedita_mcp_loop",
+    stop_reason: "independent_rubric_passed",
+    summary: finalVisualEvaluation.summary,
+    issues: finalVisualEvaluation.issues,
+    mode: independentEvaluationMode,
+    passed: true,
     physical: {
       score: finalViolationCount > 0 ? 0 : 100,
       orieditaCompleted: true,
+      foldCompleted: true,
+      forbiddenOperationsAbsent: true,
+      violationFree: finalViolationCount === 0,
+      passed: finalViolationCount === 0,
       scope: "oriedita_flat_fold_2d",
     },
     appearance: {
-      score: loop.bestScore,
+      score: finalVisualEvaluation.normalizedScore,
       rotationNormalized: true,
-      dimensions: "2d_folded_figure_reviewed_by_codex",
+      dimensions: "independent_0_to_5_visual_rubric",
     },
     foldability: {
       score: finalViolationCount > 0 ? 0 : 100,
@@ -2870,7 +3030,32 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
     evaluationLimit,
     batchSize: codexBatchIterations,
     maxCycles: evaluationLimit,
-    targetScore,
+    rubric: finalVisualEvaluation.rubric,
+    pairwise: {
+      winner: intermediateEvaluation.pairwisePreference,
+      model: intermediateEvaluation.model,
+    },
+    judges: {
+      count: finalVisualEvaluation.judgeCount,
+      passVotes: finalVisualEvaluation.passVotes,
+      requiredVotes: finalVisualEvaluation.requiredVotes,
+      aggregation: finalVisualEvaluation.aggregation,
+    },
+    models: {
+      operator: { model: ORIAI_OPERATOR_MODEL, reasoningEffort: "high", role: "oriedita_operation" },
+      intermediate: {
+        model: ORIAI_INTERMEDIATE_EVALUATOR_MODEL,
+        reasoningEffort: "medium",
+        role: "pairwise_and_rubric_screen",
+      },
+      final: {
+        model: ORIAI_FINAL_EVALUATOR_MODEL,
+        reasoningEffort: "high",
+        role: "independent_final_judge",
+        runs: ORIAI_FINAL_JUDGE_COUNT,
+      },
+    },
+    independentEvaluation: finalVisualEvaluation,
     bestCycle: loop.bestStep,
     cycleWindow: {
       total: loop.evaluationsCompleted,
@@ -2883,7 +3068,7 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
     search: {
       stateType: "crease_pattern_prefix",
       actionKind: "add_crease_via_oriedita_mcp",
-      evaluator: "codex_visual_review",
+      evaluator: "independent_codex_rubric",
       physicalScope: "oriedita_flat_fold_2d",
       sequentialPhysicalFolding: false,
       sequenceFeasibility: "unverified",
@@ -2897,8 +3082,8 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
     writeFileAtomically(
       join(job.directory, "generation-loop.json"),
       `${JSON.stringify({
-        stopReason: "target_score_reached",
-        targetScore,
+        stopReason: "independent_rubric_passed",
+        evaluationMode: independentEvaluationMode,
         scheduling: {
           policy: "round_robin_per_codex_batch",
           batchEvaluations: codexBatchIterations,
@@ -2906,7 +3091,8 @@ async function runCodexDesignLoop(job, { signal = null } = {}) {
           restartRecovery: true,
         },
         evaluationLimit,
-        bestScore: loop.bestScore,
+        operatorProvisionalScore: loop.bestScore,
+        finalRubricScore: finalVisualEvaluation.normalizedScore,
         bestStep: loop.bestStep,
         batchesCompleted: loop.batchesCompleted,
         evaluationsCompleted: loop.evaluationsCompleted,
@@ -3040,7 +3226,7 @@ async function executeJob(job) {
     : job.designMode === "corigami_final_state_v1"
       ? "第1段階: 展開図と2D折り上がりを検証中"
     : job.designMode === "codex_mcp_loop"
-      ? "CodexがOrieditaを一手ずつ操作・評価中"
+      ? "TerraがOrieditaを操作し、別プロセスのAIが評価中"
       : job.designMode === "crease_step_search"
       ? "折り線を一手ずつ追加し、OrieditaとGroqで評価中"
       : "Orieditaで折り上げ、Groqが評価中";
@@ -3152,7 +3338,8 @@ async function handle(request, response) {
         evaluationLimit,
         batchIterations: codexBatchIterations,
         maxCycles: designMode === "codex_mcp_loop" ? evaluationLimit : maxCycles,
-        targetScore,
+        operatorReviewTrigger: codexReviewTrigger,
+        publicEvaluationMode: independentEvaluationMode,
         scheduling: {
           policy: "round_robin_per_codex_batch",
           batchEvaluations: codexBatchIterations,
@@ -3170,7 +3357,18 @@ async function handle(request, response) {
           finishedWorkSubstitution: false,
         },
         evaluator: designMode === "codex_mcp_loop"
-          ? { provider: "codex", model: "Codex CLI", configured: true }
+          ? {
+            provider: "codex",
+            configured: true,
+            operator: { model: ORIAI_OPERATOR_MODEL, reasoningEffort: "high" },
+            intermediate: { model: ORIAI_INTERMEDIATE_EVALUATOR_MODEL, reasoningEffort: "medium" },
+            final: {
+              model: ORIAI_FINAL_EVALUATOR_MODEL,
+              reasoningEffort: "high",
+              independentRuns: ORIAI_FINAL_JUDGE_COUNT,
+              aggregation: "median_and_majority",
+            },
+          }
           : { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
       },
     }, origin);
@@ -3189,7 +3387,8 @@ async function handle(request, response) {
         maxCycles: designMode === "codex_mcp_loop" ? evaluationLimit : maxCycles,
         evaluationLimit,
         batchIterations: codexBatchIterations,
-        targetScore,
+        operatorReviewTrigger: codexReviewTrigger,
+        publicEvaluationMode: independentEvaluationMode,
         scheduling: {
           policy: "round_robin_per_codex_batch",
           batchEvaluations: codexBatchIterations,
@@ -3207,7 +3406,18 @@ async function handle(request, response) {
           finishedWorkSubstitution: false,
         },
         evaluator: designMode === "codex_mcp_loop"
-          ? { provider: "codex", model: "Codex CLI", configured: true }
+          ? {
+            provider: "codex",
+            configured: true,
+            operator: { model: ORIAI_OPERATOR_MODEL, reasoningEffort: "high" },
+            intermediate: { model: ORIAI_INTERMEDIATE_EVALUATOR_MODEL, reasoningEffort: "medium" },
+            final: {
+              model: ORIAI_FINAL_EVALUATOR_MODEL,
+              reasoningEffort: "high",
+              independentRuns: ORIAI_FINAL_JUDGE_COUNT,
+              aggregation: "median_and_majority",
+            },
+          }
           : { provider: "groq", model: groqModel, configured: Boolean(groqApiKey) },
         oriedita: await inspectOriedita(),
       },

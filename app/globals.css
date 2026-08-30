@@ -179,6 +179,23 @@ a { color: inherit; text-decoration: none; }
 .artifactBar a { padding: 7px 10px; border: 1px solid var(--line); border-radius: 5px; background: #fff; color: var(--blue); }
 .artifactBar a:hover { border-color: var(--blue); background: #f2f5ff; }
 
+.evaluationPanel { margin-top: 20px; overflow: hidden; border: 1px solid var(--line); border-top: 7px solid var(--yellow); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); }
+.evaluationPanel > header { min-height: 78px; padding: 16px 22px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); }
+.evaluationPanel > header p { margin: 0 0 5px; color: #9a7100; font: 850 8px/1 ui-monospace, "SFMono-Regular", monospace; letter-spacing: .12em; }
+.evaluationPanel > header h1 { margin: 0; font-size: clamp(18px, 2vw, 26px); letter-spacing: -.035em; }
+.evaluationPanel > header strong { padding: 8px 12px; border-radius: 999px; background: #e7f8f2; color: #007a59; font-size: 12px; }
+.evaluationFlow { padding: 14px 22px; display: flex; align-items: center; gap: 10px; overflow-x: auto; border-bottom: 1px solid var(--line); background: #fffdf2; }
+.evaluationFlow span { flex: 0 0 auto; padding: 7px 9px; border: 1px solid #eadfa9; border-radius: 5px; background: #fff; color: #654f13; font: 750 9px/1.3 ui-monospace, "SFMono-Regular", monospace; }
+.evaluationFlow i { color: #a37a00; font-style: normal; }
+.rubricGrid { margin: 0; display: grid; grid-template-columns: repeat(4, 1fr); }
+.rubricGrid > div { min-width: 0; padding: 18px 20px; border-right: 1px solid var(--line); }
+.rubricGrid > div:last-child { border-right: 0; }
+.rubricGrid dt { margin-bottom: 10px; color: var(--muted); font-size: 11px; font-weight: 750; }
+.rubricGrid dd { margin: 0; color: var(--ink); font-size: 28px; font-weight: 900; letter-spacing: -.04em; }
+.rubricGrid small { margin-left: 4px; color: var(--muted); font-size: 10px; letter-spacing: 0; }
+.evaluationPanel > footer { padding: 11px 20px; display: flex; flex-wrap: wrap; gap: 8px; border-top: 1px solid var(--line); background: #f8f9fb; }
+.evaluationPanel > footer span { padding: 6px 8px; border-radius: 4px; background: #e7f8f2; color: #007a59; font: 800 8px/1 ui-monospace, "SFMono-Regular", monospace; letter-spacing: .04em; }
+
 .shapingPanel {
   margin-top: 20px;
   overflow: hidden;
@@ -300,6 +317,9 @@ button:focus-visible, a:focus-visible, textarea:focus-visible, input:focus-visib
   .stageInspector { min-height: 480px; padding: 22px 18px; }
   .scopeNote { align-items: flex-start; flex-direction: column; gap: 4px; }
   .artifactBar { align-items: flex-start; flex-direction: column; }
+  .rubricGrid { grid-template-columns: 1fr 1fr; }
+  .rubricGrid > div:nth-child(2) { border-right: 0; }
+  .rubricGrid > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
 }
 
 @media (prefers-reduced-motion: reduce) {

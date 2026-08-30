@@ -665,13 +665,18 @@ test("restart leaves a live unrelated process group and its forged lease untouch
   }
 });
 
-test("health advertises a 99 target and no job-level evaluation limit", async () => {
+test("health advertises separated Terra and Sol roles and no job-level evaluation limit", async () => {
   const address = server.address();
   assert.ok(address && typeof address === "object");
   const response = await fetch(`http://127.0.0.1:${address.port}/health`);
   const payload = await response.json();
   assert.equal(response.status, 200);
-  assert.equal(payload.result.targetScore, 99);
+  assert.equal(payload.result.operatorReviewTrigger, 0);
+  assert.equal(payload.result.publicEvaluationMode, "independent_codex_rubric_v1");
+  assert.equal(payload.result.evaluator.operator.model, "gpt-5.6-terra");
+  assert.equal(payload.result.evaluator.intermediate.model, "gpt-5.6-terra");
+  assert.equal(payload.result.evaluator.final.model, "gpt-5.6-sol");
+  assert.equal(payload.result.evaluator.final.independentRuns, 3);
   assert.equal(payload.result.evaluationLimit, null);
   assert.equal(payload.result.maxIterations, null);
   assert.equal(payload.result.batchIterations, 10);

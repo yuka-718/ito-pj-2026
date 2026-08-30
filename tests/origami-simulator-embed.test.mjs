@@ -42,7 +42,7 @@ test("application uses a deployment-relative simulator URL and strict replies", 
   assert.doesNotMatch(component, /https:\/\/origamisimulator\.org/);
 });
 
-test("application waits for a 99-point Codex and Oriedita result before showing the four final-state phases", async () => {
+test("application waits for an independent Sol rubric pass before showing the four final-state phases", async () => {
   const [page, finalState] = await Promise.all([
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
     readFile(new URL("../app/corigami-final-state.ts", import.meta.url), "utf8"),
@@ -60,9 +60,9 @@ test("application waits for a 99-point Codex and Oriedita result before showing 
   assert.match(page, /API_RECONNECT_ATTEMPTS = 30/);
   assert.match(page, /生成サーバーへ接続できませんでした/);
   assert.match(page, /waitForJob\(payload\.job\.id/);
-  assert.match(page, /result && hasReachedAppearanceTarget\(result\.evaluation\)/);
-  assert.match(page, /hasReachedAppearanceTarget\(payload\.job\.result\.evaluation\)/);
-  assert.match(page, /TARGET_APPEARANCE_SCORE/);
+  assert.match(page, /result && hasPassedIndependentEvaluation\(result\.evaluation\)/);
+  assert.match(page, /hasPassedIndependentEvaluation\(payload\.job\.result\.evaluation\)/);
+  assert.match(page, /evaluatedRubric/);
   assert.match(page, /foldFromDataUrl\(completed\.foldFile\)/);
   assert.doesNotMatch(page, /foldFromDataUrl\(completed\.sourceFoldFile\)/);
   assert.doesNotMatch(page, /\?\? primaryFold/);

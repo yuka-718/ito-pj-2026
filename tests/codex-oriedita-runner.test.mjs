@@ -135,6 +135,8 @@ test("Codex loop prompt requires one crease, fold calculation, image review when
   });
 
   assert.match(prompt, /候補の追加と評価をちょうど10回/);
+  assert.match(prompt, /点数は候補を一時選別するための暫定値/);
+  assert.match(prompt, /別プロセスの独立評価担当/);
   assert.match(prompt, /一回につき add_line をちょうど1回/);
   assert.match(prompt, /calculate_fold/);
   assert.match(prompt, /get_folded_figure/);
@@ -151,7 +153,7 @@ test("Codex loop prompt requires one crease, fold calculation, image review when
   assert.match(prompt, /同点または悪化した候補は必ず accepted=false/);
   assert.match(prompt, /バッチ開始時の実証済み最高点: 74/);
   assert.match(prompt, /今回の通算評価番号: 21〜30/);
-  assert.match(prompt, /表示可能になる目標点: 99/);
+  assert.match(prompt, /独立審査へ渡す暫定点: 99/);
   assert.match(prompt, /以前の試行要約/);
   assert.match(prompt, /毎回現在CPを読み、未使用の候補を選ぶ/);
   assert.match(prompt, /add_lineの直後、calculate_foldより前にもう一度 get_crease_pattern/);

@@ -2,41 +2,61 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  evaluatedAppearanceScore,
-  hasReachedAppearanceTarget,
-  TARGET_APPEARANCE_SCORE,
+  evaluatedRubric,
+  FINAL_JUDGE_COUNT,
+  hasPassedIndependentEvaluation,
+  INDEPENDENT_EVALUATION_MODE,
 } from "../app/evaluation-target.ts";
 
-test("the public result gate opens only at an evaluated appearance score of 99", () => {
-  assert.equal(TARGET_APPEARANCE_SCORE, 99);
-  assert.equal(hasReachedAppearanceTarget({ score: 98 }), false);
-  assert.equal(hasReachedAppearanceTarget({ score: 99 }), false);
-  assert.equal(hasReachedAppearanceTarget({ score: 100 }), false);
-  assert.equal(hasReachedAppearanceTarget({ score: Number.NaN }), false);
-  assert.equal(hasReachedAppearanceTarget({ appearance: { score: Number.NaN } }), false);
-  assert.equal(hasReachedAppearanceTarget({ appearance: { score: "99" } }), false);
-  assert.equal(hasReachedAppearanceTarget({
-    mode: "corigami_final_state_v1",
-    targetScore: 99,
-    appearance: { score: 99 },
-  }), false);
-  assert.equal(hasReachedAppearanceTarget({
-    mode: "codex_oriedita_mcp_loop",
-    targetScore: 98,
-    appearance: { score: 99 },
-  }), false);
-  assert.equal(hasReachedAppearanceTarget(null), false);
+const passingEvidence = () => ({
+  mode: INDEPENDENT_EVALUATION_MODE,
+  passed: true,
+  physical: {
+    passed: true,
+    foldCompleted: true,
+    forbiddenOperationsAbsent: true,
+    violationFree: true,
+  },
+  rubric: {
+    motifRecognizability: 4,
+    requiredParts: 4,
+    proportionBalance: 4,
+    referenceSimilarity: null,
+  },
+  judges: {
+    count: FINAL_JUDGE_COUNT,
+    passVotes: 2,
+    requiredVotes: 2,
+    aggregation: "median_and_majority",
+  },
 });
 
-test("the appearance subscore is authoritative when present", () => {
-  const evidence = (appearanceScore: number) => ({
+test("the public result gate requires physical checks and three independent final judges", () => {
+  assert.equal(hasPassedIndependentEvaluation(passingEvidence()), true);
+  assert.equal(hasPassedIndependentEvaluation({ score: 100 }), false);
+  assert.equal(hasPassedIndependentEvaluation({
     mode: "codex_oriedita_mcp_loop",
     targetScore: 99,
-    score: 100,
-    appearance: { score: appearanceScore },
-  });
-  assert.equal(evaluatedAppearanceScore(evidence(98)), 98);
-  assert.equal(hasReachedAppearanceTarget(evidence(98)), false);
-  assert.equal(hasReachedAppearanceTarget(evidence(99)), true);
-  assert.equal(hasReachedAppearanceTarget(evidence(100)), true);
+    appearance: { score: 100 },
+  }), false);
+  assert.equal(hasPassedIndependentEvaluation({
+    ...passingEvidence(),
+    physical: { ...passingEvidence().physical, violationFree: false },
+  }), false);
+  assert.equal(hasPassedIndependentEvaluation({
+    ...passingEvidence(),
+    judges: { ...passingEvidence().judges, count: 1 },
+  }), false);
+});
+
+test("the 0-to-5 rubric must be complete and finite", () => {
+  assert.deepEqual(evaluatedRubric(passingEvidence()), passingEvidence().rubric);
+  assert.equal(evaluatedRubric({
+    ...passingEvidence(),
+    rubric: { ...passingEvidence().rubric, requiredParts: Number.NaN },
+  }), null);
+  assert.equal(evaluatedRubric({
+    ...passingEvidence(),
+    rubric: { ...passingEvidence().rubric, proportionBalance: 6 },
+  }), null);
 });

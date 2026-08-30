@@ -4,8 +4,8 @@ import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 
 import OrigamiSimulator3D from "./OrigamiSimulator3D";
 import {
-  hasReachedAppearanceTarget,
-  TARGET_APPEARANCE_SCORE,
+  evaluatedRubric,
+  hasPassedIndependentEvaluation,
 } from "./evaluation-target";
 import {
   createCOrigamiFinalState,
@@ -44,8 +44,31 @@ type Evaluation = {
   iterations: number;
   summary: string;
   mode: string;
-  targetScore?: number;
+  passed?: boolean;
   appearance?: { score?: number };
+  physical?: {
+    foldCompleted?: boolean;
+    forbiddenOperationsAbsent?: boolean;
+    violationFree?: boolean;
+    passed?: boolean;
+  };
+  rubric?: {
+    motifRecognizability: number;
+    requiredParts: number;
+    proportionBalance: number;
+    referenceSimilarity: number | null;
+  };
+  judges?: {
+    count: number;
+    passVotes: number;
+    requiredVotes: number;
+    aggregation: string;
+  };
+  models?: {
+    operator?: { model?: string; reasoningEffort?: string };
+    intermediate?: { model?: string; reasoningEffort?: string };
+    final?: { model?: string; reasoningEffort?: string; runs?: number };
+  };
   steps?: EvaluationStep[];
 };
 
@@ -218,8 +241,8 @@ async function waitForJob(id: string, onMessage: (message: string) => void, sign
     if (!response.ok || !payload.job) throw new Error(payload.error ?? "処理状況を取得できませんでした");
     onMessage(payload.job.message);
     if (payload.job.status === "done" && payload.job.result) {
-      if (!hasReachedAppearanceTarget(payload.job.result.evaluation)) {
-        throw new Error(`評価が${TARGET_APPEARANCE_SCORE}%へ到達する前に処理が終了しました`);
+      if (!hasPassedIndependentEvaluation(payload.job.result.evaluation)) {
+        throw new Error("独立した最終評価の合格証跡を確認できませんでした");
       }
       return payload.job.result;
     }
@@ -261,7 +284,7 @@ export default function Home() {
       setElapsedSeconds(Math.max(0, Math.floor((Date.now() - stored.startedAt) / 1_000)));
       setRunStartedAt(stored.startedAt);
       setRunState("running");
-      setMessage(`${TARGET_APPEARANCE_SCORE}%一致までCodexとOrieditaで評価中`);
+      setMessage("Terraが操作し、独立したSolが0〜5基準で評価中");
       void waitForJob(stored.id, setMessage, controller.signal).then((completed) => {
         if (controller.signal.aborted) return;
         setResult(createDisplayResult(completed, stored.description));
@@ -323,7 +346,7 @@ export default function Home() {
     const startedAt = Date.now();
     setRunStartedAt(startedAt);
     setRunState("running");
-    setMessage(`${TARGET_APPEARANCE_SCORE}%一致までCodexとOrieditaで評価中`);
+    setMessage("Terraが操作し、独立したSolが0〜5基準で評価中");
 
     try {
       const analysis = analyzeDescription(description);
@@ -374,6 +397,7 @@ export default function Home() {
   const activeStage = result?.finalState.stages.find((stage) => stage.id === activeStageId)
     ?? result?.finalState.stages[0]
     ?? null;
+  const finalRubric = evaluatedRubric(result?.evaluation);
 
   return (
     <main className="generatorPage">
@@ -438,7 +462,7 @@ export default function Home() {
         <p className="srOnly" role="status" aria-live="polite">{message}</p>
       </form>
 
-      {result && hasReachedAppearanceTarget(result.evaluation) && (
+      {result && hasPassedIndependentEvaluation(result.evaluation) && (
         <section className="outputs" aria-label="生成結果">
           <div className="phaseOneGrid">
             <article className="outputPanel creasePanel">
@@ -471,6 +495,37 @@ export default function Home() {
               </div>
             </article>
           </div>
+
+          {finalRubric && (
+            <article className="evaluationPanel" aria-label="独立AI評価">
+              <header>
+                <div>
+                  <p>INDEPENDENT FINAL REVIEW</p>
+                  <h1>操作AIと評価AIを分離</h1>
+                </div>
+                <strong>合格</strong>
+              </header>
+              <div className="evaluationFlow">
+                <span>操作 {result.evaluation.models?.operator?.model ?? "gpt-5.6-terra"} / high</span>
+                <i aria-hidden="true">→</i>
+                <span>途中評価 {result.evaluation.models?.intermediate?.model ?? "gpt-5.6-terra"} / medium</span>
+                <i aria-hidden="true">→</i>
+                <span>最終評価 {result.evaluation.models?.final?.model ?? "gpt-5.6-sol"} / high ×3</span>
+              </div>
+              <dl className="rubricGrid">
+                <div><dt>モチーフ認識</dt><dd>{finalRubric.motifRecognizability}<small>/5</small></dd></div>
+                <div><dt>必要な部位</dt><dd>{finalRubric.requiredParts}<small>/5</small></dd></div>
+                <div><dt>比率・バランス</dt><dd>{finalRubric.proportionBalance}<small>/5</small></dd></div>
+                <div><dt>参照画像との類似</dt><dd>{finalRubric.referenceSimilarity ?? "—"}<small>{finalRubric.referenceSimilarity === null ? "画像なし" : "/5"}</small></dd></div>
+              </dl>
+              <footer>
+                <span>折り完了 ✓</span>
+                <span>禁止操作なし ✓</span>
+                <span>違反なし ✓</span>
+                <span>Sol多数決 {result.evaluation.judges?.passVotes}/{result.evaluation.judges?.count}</span>
+              </footer>
+            </article>
+          )}
 
           {activeStage && (
             <article className="shapingPanel">

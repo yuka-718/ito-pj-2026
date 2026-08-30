@@ -14,6 +14,7 @@ import { appendFile, chmod, lstat, mkdir, mkdtemp, open, readFile, rename, rm, w
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
+import { ORIAI_OPERATOR_MODEL } from "./codex-visual-evaluator.mjs";
 import { inspectSymlinkFreePath } from "./restricted-oriedita-mcp.mjs";
 
 const DEFAULT_SCHEMA = new URL("./codex-result.schema.json", import.meta.url).pathname;
@@ -939,7 +940,7 @@ export function buildCodexLoopPrompt({
   const target = normalizeTargetScore(targetScore);
   const firstGlobalIteration = offset + 1;
   const lastGlobalIteration = offset + maximumIterations;
-  return `あなたは折り紙設計を反復する実行担当です。Oriedita MCPを実際に操作し、折り線を一手ずつ追加して、毎回の折り上がり画像を自分で評価してください。
+  return `あなたは折り紙設計を反復する操作担当です。Oriedita MCPを実際に操作し、折り線を一手ずつ追加してください。ここで付ける点数は候補を一時選別するための暫定値であり、公開可否は履歴を受け取らない別プロセスの独立評価担当が決めます。
 
 最重要のツール規則:
 - OrieditaはMCPリソースではなく、すでに登録済みのMCPツール群です。最初のツール呼び出しは必ず oriedita.get_status にしてください。
@@ -961,7 +962,7 @@ ${safeJson(priorAttemptsSummary)}
 今回のバッチ状態:
 - バッチ開始時の実証済み最高点: ${bestScoreBeforeBatch}
 - 今回の通算評価番号: ${firstGlobalIteration}〜${lastGlobalIteration}
-- 表示可能になる目標点: ${target}
+- 独立審査へ渡す暫定点: ${target}
 
 使用を許可するファイル:
 - 初期状態: ${startingPath}
@@ -975,10 +976,10 @@ ${safeJson(priorAttemptsSummary)}
 3. 候補の追加と評価をちょうど${maximumIterations}回行う。これは通算評価${firstGlobalIteration}〜${lastGlobalIteration}に当たる。目標点へ途中で到達しても今回のバッチの${maximumIterations}回は完了する。必ず一回につき add_line をちょうど1回だけ実行する。線の両端は get_crease_pattern で読んだ正方形の境界上に置き、色はMOUNTAINかVALLEYだけを使う。
 4. 各候補の直前に get_crease_pattern で現在の最良CPを読み、既存折り線と今回までに試した線を照合して、未使用の候補を一つ選ぶ。add_lineの直後、calculate_foldより前にもう一度 get_crease_pattern を呼び、lineCountと全線内容が追加前から実際に変化したことを確認する。変化しない線、add_line応答と座標・色が一致しない線、同じ線を端点の順序だけ変えた候補は評価しない。固定の座標列を反復せず、目標の部位・対称性・面積配分と現在CPの空き領域から次の位置と向きを決める。同じ線を別バッチも含めて再試行しない。各候補で calculate_fold を呼び、${maximumIterations}回すべてで started=true、violationCount=0、completed=trueを満たす必要がある。交差して未完成の内点を作る線を避け、必要なら紙の端から端までの互いに交差しない平行線を優先する。どこか一回でもCP変化の実証または平坦折り計算が失敗したら、成功したふりをせず最終ジョブは失敗として報告する。
    - 初期状態が境界4辺だけの正方形で、かつ通算最初の候補なら、安全な検証フォールバックとして境界と重複しない水平MOUNTAINを一つ選べる。その後は毎回現在CPを読み、未使用の候補を選ぶ。
-5. 各回で必ず get_folded_figure を成功させ、返されたその回の画像の輪郭を目標データと比較する。部位、突起、太さ、左右バランスを画像だけから0〜100点で評価する。最終stepsには各回の実値として fold_calculation_started、fold_completed、violation_count、image_reviewed を記録する。
+5. 各回で必ず get_folded_figure を成功させ、返されたその回の画像の輪郭を目標データと比較する。部位、突起、太さ、左右バランスを画像だけから暫定評価する。この暫定値は同じバッチ内で保存候補を選ぶためだけに使い、最終合格を宣言しない。最終stepsには各回の実値として fold_calculation_started、fold_completed、violation_count、image_reviewed を記録する。
 6. バッチ開始時の実証済み最高点${bestScoreBeforeBatch}、または今回それ以後に採用した候補の最高点を厳密に上回った候補だけを accepted=true とし、export_file で最良FOLDとして保存する。同点または悪化した候補は必ず accepted=false とし、export_fileせず、最良FOLDをopen_fileで開き直して巻き戻す。同じ線を繰り返さない。最終JSONのscoreやbest_stepを自己申告の成功判定に使わず、各stepsの実評価値と実際の保存・巻き戻し操作を一致させる。
 7. 途中の展開図だけから完成形を想像して採点せず、必ず各回の get_folded_figure の画像を見てから判断する。
-8. ${target}点以上を目標に探索する。今回のバッチで届かなくても失敗を隠さず、次バッチが継続できる最良FOLDを残す。最後に最良FOLDをopen_fileで開き、calculate_fold と get_folded_figure で再確認し、export_fileで ${finalFoldPath} と ${finalCreasePath} を上書きする。
+8. ${maximumIterations}回の候補確認を完了し、独立審査へ渡す暫定候補を残す。最終合格は宣言しない。最後に暫定候補をopen_fileで開き、calculate_fold と get_folded_figure で再確認し、export_fileで ${finalFoldPath} と ${finalCreasePath} を上書きする。
 
 制約:
 - Oriedita MCP以外でOrieditaを操作しない。
@@ -1013,7 +1014,10 @@ export async function runCodexOrieditaLoop({
   timeoutMs = 1_200_000,
   codexPath = process.env.ORI_AI_CODEX_PATH ?? "codex",
   mcpServerPath = process.env.ORIEDITA_MCP_SERVER ?? DEFAULT_MCP_SERVER,
-  reasoningEffort = process.env.ORI_AI_CODEX_REASONING_EFFORT ?? "high",
+  model = process.env.ORI_AI_OPERATOR_MODEL?.trim() || ORIAI_OPERATOR_MODEL,
+  reasoningEffort = process.env.ORI_AI_OPERATOR_REASONING_EFFORT
+    ?? process.env.ORI_AI_CODEX_REASONING_EFFORT
+    ?? "high",
   schemaPath = DEFAULT_SCHEMA,
   secureStagingRoot = process.env.ORI_AI_SECURE_STAGING_ROOT ?? SECURE_STAGING_ROOT,
   onProgress = () => {},
@@ -1058,6 +1062,7 @@ export async function runCodexOrieditaLoop({
     "--ignore-user-config",
     "--json",
     "--sandbox", "workspace-write",
+    "--model", model,
     "-c", "approval_policy=\"never\"",
     "-c", "mcp_servers.oriedita.default_tools_approval_mode=\"approve\"",
     "-c", `mcp_servers.oriedita.enabled_tools=${JSON.stringify([
